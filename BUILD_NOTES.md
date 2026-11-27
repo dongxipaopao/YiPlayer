@@ -102,6 +102,16 @@ v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
   报 ATS 错误，但也没有明确确认放行）；LiveContainer 下应用内文件
   浏览是否好用。
 
+- **v2.1 构建实录**：run #36（workflow_dispatch，head d07afd5）
+  在 `Fetch Python-Apple-support` 一步失败：`curl
+  https://api.github.com/repos/beeware/Python-Apple-support/releases`
+  返回 403（curl exit 56）——共享 Actions 跑者的未认证 API
+  限额（60 次/小时/IP）被耗尽；v2.0.0 时缓存命中所以没触发。
+  修复：`Scripts/fetch-python.sh` 在有 `GITHUB_TOKEN`（Actions
+  每轮自带）时用 `Authorization: Bearer` 调 API；写成 if/else 而
+  不是空数组（该脚本跑在 bash 3.2 下，`set -u` 时空数组展开会
+  报错）。已推送，待下一次构建验证。
+
 ## v2 改了什么（相对 v1）
 
 - **py 源成真了**：`Runtime/PythonHost/`（`ApplePython.c/.h` C 桥、
