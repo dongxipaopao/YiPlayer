@@ -73,6 +73,12 @@ jobs:
           key: yiplayer-vendor-${{ runner.os }}-${{ hashFiles('Scripts/fetch-python.sh', 'Scripts/fetch-node-mobile.sh') }}
 
       - name: Fetch Python-Apple-support (CPython 3.13)
+        # GITHUB_TOKEN is NOT auto-exported to shell steps; without this
+        # env the script calls api.github.com unauthenticated and hits the
+        # shared-runner 60 req/hour limit (403, runs #36/#38). With it the
+        # call is authenticated. The token is only used for this read.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: sh Scripts/fetch-python.sh
 
       - name: Fetch nodejs-mobile (Node.js 26 LTS)
