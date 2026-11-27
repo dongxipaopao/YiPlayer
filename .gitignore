@@ -1,0 +1,15 @@
+# YiPlayer .gitignore
+# Vendored runtimes are downloaded by CI (Scripts/fetch-*.sh), never committed.
+vendor/
+# Xcode / build outputs
+build/
+*.xcarchive
+*.ipa
+DerivedData/
+YiPlayer.xcodeproj/
+# macOS
+.DS_Store
+
+# Python bytecode (created by local py_compile checks)
+__pycache__/
+*.pyc
