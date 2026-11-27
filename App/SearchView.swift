@@ -49,11 +49,13 @@ struct SearchView: View {
         for source in subscriptions.allSources where source.isSearchable {
             do {
                 merged.append(contentsOf: try await runner(for: source).search(keyword: keyword, page: 1))
-            } catch is CancellationError {
-                // Search superseded by a newer query: not an error.
-                return
             } catch {
-                errors.append("\(source.name)：\(error.localizedDescription)")
+                // v2.1: a superseded search is a cancellation, not an
+                // error; other errors are shown per-source.
+                if isCancellation(error) { return }
+                if let message = displayableErrorMessage(error) {
+                    errors.append("\(source.name)：\(message)")
+                }
             }
         }
         results = merged
