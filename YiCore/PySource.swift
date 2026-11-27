@@ -80,6 +80,25 @@ public protocol PySourceHost: AnyObject {
 /// blocking network calls pd.py makes (requests, 15 s timeout) happen
 /// on that background queue, never on the main thread.
 ///
+/// Initialisation (v2.1.1 — read before changing): the interpreter
+/// is initialised ONCE, on this serial queue, and the outcome is
+/// cached (see ensureInitialized). CPython 3.13's
+/// Py_InitializeFromConfig may only be attempted once per process:
+/// its core init sets runtime->core_initialized = 1 as soon as the
+/// interpreter object exists, and if the later main init then fails,
+/// a second call from any other thread takes the reconfigure branch
+/// (Python/pylifecycle.c: pyinit_core_reconfigure) and fails with
+/// "failed to read thread state" because the thread state belongs to
+/// the first thread. v2.1.0 called ensureInitialized() from
+/// arbitrary Swift executor threads on every Discover/Search/Home
+/// call, with no lock — so after the first failure every later call
+/// failed with exactly that misleading message. The reference
+/// implementation (tvbox-silicon EmbeddedPythonHost +
+/// ApplePython.c: dispatch_once_f + a cached `failure` string that
+/// every later request answers with; MarcoMovie's native-python
+/// profile: "its current failure policy retires a failed source")
+/// does the same: one attempt, cached outcome, no retries.
+///
 /// First call cost: the interpreter initialises once per process.
 /// Expect a slow first py call (Yingxia measured ~18 s cold start in
 /// the simulator for the full plan; YiPlayer's bundle is smaller —
@@ -91,6 +110,13 @@ public final class EmbeddedPythonHost: PySourceHost {
 
     private let queue = DispatchQueue(label: "com.yiplayer.python", qos: .userInitiated)
     private var initialized = false
+    /// v2.1.1: the first initialisation failure, cached forever.
+    /// A failed interpreter stays failed for the life of the process
+    /// (CPython cannot be re-initialised after a half-finished init),
+    /// so later calls throw this instead of retrying — retrying from
+    /// another thread only produces "failed to read thread state".
+    /// Only ever read/written on `queue` (see call()).
+    private var initFailure: SourceError?
     /// Last detail payload per source id, so playLines(for:) can resolve
     /// every line for an episode number from its playGroups.
     private var lastDetail: [String: VideoItem] = [:]
@@ -125,9 +151,29 @@ public final class EmbeddedPythonHost: PySourceHost {
         return dir
     }
 
-    // MARK: Initialisation (lazy, once)
+    // MARK: Initialisation (lazy, once, on the serial queue)
+    /// MUST only be called on `queue` (call() guarantees this).
+    /// Exactly one YiPythonInitialize attempt per process; the
+    /// outcome is cached here and in the C bridge, so a failed init
+    /// is reported with its true first reason instead of being
+    /// retried into "failed to read thread state".
     private func ensureInitialized() throws {
         if initialized { return }
+        if let failure = initFailure { throw failure }
+        do {
+            try ensureInitializedAttempt()
+        } catch let error as SourceError {
+            initFailure = error
+            throw error
+        } catch {
+            let wrapped = SourceError.parse("Python 运行时初始化失败：\(error.localizedDescription)")
+            initFailure = wrapped
+            throw wrapped
+        }
+        initialized = true
+    }
+
+    private func ensureInitializedAttempt() throws {
         guard let framework = Self.pythonFrameworkURL,
               let spiders = Self.spidersDirURL,
               let stdlib = Self.pythonStdlibDirURL else {
@@ -155,22 +201,39 @@ public final class EmbeddedPythonHost: PySourceHost {
         guard rc == 0, YiPythonIsReady() != 0 else {
             // v2.1: the C bridge records WHY init failed (PyStatus
             // message + paths tried) — surface it, not just the code.
+            // v2.1.1: this is the FIRST failure, cached by the caller;
+            // if the interpreter had already failed once, the C
+            // bridge returns the cached code without re-entering
+            // CPython, so this message stays the true reason.
             let detail = YiPythonLastError().map(String.init(cString:))
                 .flatMap { $0.isEmpty ? nil : $0 } ?? "未知原因"
             throw SourceError.parse("Python 运行时初始化失败（错误码 \(rc)）：\(detail)")
         }
-        initialized = true
     }
 
     // MARK: One bridge call (serial queue, GIL held inside the C call)
     private func call(scriptPath: String, method: String, args: [Any]) async throws -> Any {
-        try ensureInitialized()
         let argsData = try JSONSerialization.data(withJSONObject: args)
         guard let argsJson = String(data: argsData, encoding: .utf8) else {
             throw SourceError.parse("调用参数编码失败")
         }
-        let raw: String? = await withCheckedContinuation { continuation in
+        // v2.1.1: initialisation runs INSIDE this queue block, not
+        // before it. v2.1.0 called ensureInitialized() here on the
+        // Swift executor thread, so concurrent Discover/Search/Home
+        // calls raced into Py_InitializeFromConfig from different
+        // threads — CPython init is not safe to run twice concurrently
+        // (Python/pylifecycle.c: "you cannot use multiple threads"),
+        // and the loser failed with "failed to read thread state".
+        // Now init and every spider call are serialised on the one
+        // queue, exactly like Yingxia's SerializedPluginWorker.
+        let raw: String? = try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                do {
+                    try self.ensureInitialized()
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
                 guard let cString = YiPythonCallSpider(scriptPath, method, argsJson) else {
                     continuation.resume(returning: nil as String?)
                     return
