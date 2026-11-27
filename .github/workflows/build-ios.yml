@@ -1,9 +1,27 @@
 # Build YiPlayer (unsigned) — GitHub Actions, free macOS runner
-# Manual trigger only. Produces an UNSIGNED .ipa (install test only).
+# Manual trigger, or push to main touching code / runtimes / scripts.
+# Produces an UNSIGNED .ipa (install test only).
 # No secrets are used. No signing of any kind happens here.
 # To install on a phone, sign afterwards with cider / Sideloadly using
 # a free Apple ID (7 days) or a paid developer certificate.
 # See README.md — "Installing the unsigned IPA".
+#
+# v2: the build also downloads two prebuilt runtimes into vendor/
+# (NOT committed — see Scripts/fetch-python.sh and Scripts/fetch-node-mobile.sh):
+#  - BeeWare Python-Apple-support 3.13 -> vendor/Python.xcframework
+#  - jo32/nodejs-mobile 26.13.0      -> vendor/NodeMobile.xcframework
+# vendor/ is cached between runs (keyed on the fetch scripts). If the
+# download fails, `xcodegen generate` fails loudly — a build without
+# py/cat support must never silently ship.
+# Pure-Python wheels for pd.py (requests + deps) are installed into
+# Runtime/PythonHost/spiders/site-packages; any .so in there fails the
+# build (native wheels cannot load on iOS).
+#
+# Icon assets: the .png files in YiPlayer.xcassets cannot be pushed
+# through the text-only GitHub API, so they travel as base64 chunks in
+# icons-b64/part-* (a gzipped tarball, split at 220 KB). The
+# "Restore icon assets" step below decodes them before xcodegen runs.
+# To refresh the icons, re-tar YiPlayer.xcassets and re-split.
 #
 # NOTE: all paths are REPO ROOT paths. project.yml, App/, YiCore/,
 # Runtime/ and Player/ live at the repo root (not under a YiPlayer/
@@ -16,6 +34,14 @@ on:
     branches: [main]
     paths:
       - '**.swift'
+      - '**.c'
+      - '**.h'
+      - '**.mm'
+      - '**.py'
+      - '**.mjs'
+      - 'Scripts/**'
+      - 'Runtime/**'
+      - 'icons-b64/**'
       - 'project.yml'
       - '.github/workflows/build-ios.yml'
 
@@ -27,8 +53,57 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore icon assets
+        run: |
+          # icons-b64/part-* is a gzipped tarball of YiPlayer.xcassets,
+          # base64-split because the .png files cannot travel through
+          # the text-only GitHub API. Reconstructed before xcodegen.
+          python3 -c "import base64, glob; data = b''.join(open(f, 'rb').read() for f in sorted(glob.glob('icons-b64/part-*'))); open('/tmp/icons.tar.gz', 'wb').write(base64.b64decode(data))"
+          tar xzf /tmp/icons.tar.gz
+          ls YiPlayer.xcassets/AppIcon.appiconset/ | head -5
+
       - name: Show Xcode version
         run: xcodebuild -version
+
+      - name: Cache vendored runtimes
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          # Changes when either fetch script changes (pinned versions live there).
+          key: yiplayer-vendor-${{ runner.os }}-${{ hashFiles('Scripts/fetch-python.sh', 'Scripts/fetch-node-mobile.sh') }}
+
+      - name: Fetch Python-Apple-support (CPython 3.13)
+        run: sh Scripts/fetch-python.sh
+
+      - name: Fetch nodejs-mobile (Node.js 26 LTS)
+        run: sh Scripts/fetch-node-mobile.sh
+
+      - name: Install pure-Python deps for pd.py
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet \
+            --target Runtime/PythonHost/spiders/site-packages \
+            --only-binary=:all: \
+            -r Runtime/PythonHost/requirements.txt
+          # Native wheels cannot load on iOS: any .so here fails the build.
+          if find Runtime/PythonHost/spiders/site-packages -name '*.so' -print -quit | grep -q .; then
+            echo "::error::site-packages contains .so files (native wheels cannot run on iOS):"
+            find Runtime/PythonHost/spiders/site-packages -name '*.so'
+            exit 1
+          fi
+          echo "site-packages OK (pure Python only):"
+          ls Runtime/PythonHost/spiders/site-packages | head -20
+
+      - name: Sync pd.py from repo root
+        run: |
+          # The repo-root pd.py is the user's live spider; the bundled
+          # copy must never drift from it.
+          if [ -f pd.py ]; then
+            cp -f pd.py Runtime/PythonHost/spiders/pd.py
+            echo "Synced pd.py ($(wc -l < Runtime/PythonHost/spiders/pd.py) lines)"
+          else
+            echo "::warning::No repo-root pd.py found; using the bundled copy."
+          fi
 
       - name: Install XcodeGen
         run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
