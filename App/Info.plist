@@ -15,32 +15,22 @@
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.0.0</string>
+	<string>2.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>UIApplicationSceneManifest</key>
-	<dict>
-		<key>UIApplicationSupportsMultipleScenes</key>
-		<false/>
-	</dict>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- 用户自备的视频源大量是 http（播放地址由用户订阅提供），
-		     且猫源/播放代理都走本机 127.0.0.1 loopback，所以放开：
-		     NSAllowsArbitraryLoads = http 订阅/播放地址可用；
-		     NSAllowsLocalNetworking = 本机回环（Node 服务 + HLS 代理）可用。
-		     注意：这个键在 v1 的 Info.plist 里已经存在，但用户在 v1
-		     里导入 http://www.y456y.com 时仍然报了 ATS 错误。最可能
-		     的原因是用户装的那个 IPA 是在加这个键之前构建的；也不
-		     排除 LiveContainer 的启动路径绕过了它。v2 在 project.yml
-		     的 info.properties 里也写了一份（双保险），并把这个未解
-		     之谜记在 BUILD_NOTES.md 里。 -->
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
+	</dict>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
 	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
