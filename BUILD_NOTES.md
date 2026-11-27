@@ -1,13 +1,103 @@
-# BUILD_NOTES.md — 假设与未验证项（v2.1）
+# BUILD_NOTES.md — 假设与未验证项（v2.1.1）
 
-本文件列出构建 YiPlayer v1 + v2 + v2.1 时做的每一个假设和每一条未验证的说法。
-**v2.1 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
+本文件列出构建 YiPlayer v1 + v2 + v2.1 + v2.1.1 时做的每一个假设和每一条未验证的说法。
+**v2.1.1 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
 macOS / Xcode；只做了 YAML 语法、Swift 括号平衡、Python/JS 语法、
 以及文件引用完整性等静态检查（见“已验证”）。
 v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
 见“v1 历史”）；v2 的构建也是真的（Actions run #22 成功，23.4 MB
 未签名 IPA，见“v2 构建实录”），用户已在 LiveContainer 里装了 v2.0.0，
-报了 4 个问题，v2.1 就是针对这 4 个问题修的（见“v2.1 改了什么”）。
+报了 4 个问题，v2.1 就是针对这 4 个问题修的（见“v2.1 改了什么”）；
+v2.1.0 也已构建成功（Actions run #37，31.3 MB IPA，见“v2.1 构建实录”），
+用户装后报 Python 仍失败（新报错带上了真实原因），v2.1.1 就是针对
+这个修的（见“v2.1.1 改了什么”）。
+
+## v2.1.1 改了什么（相对 v2.1）
+
+用户在 LiveContainer 里装了 v2.1.0 后，懂片帝仍失败，但报错第一次带上了
+真实原因（v2.1 的诊断改进在起作用）：
+
+> 解析失败：Python 运行时初始化失败（错误码 4）：
+> Py_InitializeFromConfig failed (stdlib /private/var/mobile/Containers/Data/
+> Application/132103A4-.../Documents/Applications/com.yiplayer.app.app/
+> python-stdlib/python3.13): failed to read thread state
+
+首页仍是空的（两个源都出不来内容），设置页新 UI 正常出现，证明装的
+确实是 v2.1。
+
+- **根因：初始化被重复调用了——而且是从不同线程。**
+  证据分三层，全部是读到的源码，不是猜的：
+  1. CPython 3.13 源码 `Python/pylifecycle.c`（v3.13.0，2026-11-27
+     下载核对）：`pyinit_core`（第 1068 行）按 `runtime->core_initialized`
+     分支——第一次走 `pyinit_config`（第 917 行），它在
+     `pycore_init_runtime` + `pycore_create_interpreter` +
+     `pycore_interp_init` 全部成功后才把 `core_initialized` 置 1；
+     第二次调用走 `pyinit_core_reconfigure`（第 467 行），第一步就是
+     `_PyThreadState_GET()`，当前线程没有绑定的 thread state 就返回
+     `_PyStatus_ERR("failed to read thread state")`（第 475 行）。文件
+     头注释还写明：调用这些 API 时必须持有解释器锁，“you cannot use
+     multiple threads”。
+  2. v2.1.0 的 `YiCore/PySource.swift` 里 `call()` 先在 Swift 并发
+     执行器线程上调 `ensureInitialized()`，再把蜘蛛调用 dispatch 到
+     串行队列——初始化根本不在串行队列上，且 `initialized` 只是一个
+     无锁的 Bool。首页、发现、搜索并发触发时，两个任务能同时进入
+     `Py_InitializeFromConfig`：先到的把 `core_initialized` 置 1，
+     后到的（或任何一次重试）走重配置分支，在另一个线程上
+     `_PyThreadState_GET()` 为 NULL，于是报 "failed to read thread
+     state"。第一次失败的真正原因就此被盖住，再也看不见。
+  3. 参考实现佐证：tvbox-silicon 的 `ApplePython.c` 用
+     `dispatch_once_f(&started, ...)` 保证初始化一生只跑一次，失败
+     原因记进静态 `failure` 字符串，之后每次请求都直接返回它；
+     `EmbeddedPythonHost` 是 Swift actor，所有请求走
+     `SerializedPluginWorker`。MarcoMovie 的
+     `docs/native-python-source-profile.md`（2026-11-27 读到上游
+     原文）也写明失败策略是“retires a failed source”（失败的源直接
+     退役，不重试），且 iOS 加载器用“independent native threads and
+     own-GIL interpreters, bounded queues”。
+  改动：
+  - `YiCore/PySource.swift`：`call()` 改成在串行队列里先初始化
+    （`withCheckedThrowingContinuation` + `queue.async`，初始化与
+    每次蜘蛛调用都在同一队列上串行）；`ensureInitialized()` 只在
+    队列上跑，失败记进 `initFailure`，之后直接抛缓存的错误，不再
+    调 C 桥。`initialized` / `initFailure` 只在队列上读写，不再有
+    数据竞争。
+  - `Runtime/PythonHost/ApplePython.c`：`YiPythonInitialize` 包一层
+    once 守卫（`g_initAttempted` / `g_initResult`，第一次尝试的结果
+    被缓存，之后直接返回，不再进 `Py_InitializeFromConfig`）；配置
+    上按 tvbox-silicon `configure()` 补了 `config.executable`（用
+    `_NSGetExecutablePath` 取应用可执行文件路径）、`utf8_mode = 1`、
+    `write_bytecode = 0`、`install_signal_handlers = 0`，以及
+    `signal(SIGPIPE, SIG_IGN)` / `signal(SIGXFSZ, SIG_IGN)`（写关闭
+    的 socket 只会让蜘蛛收到 BrokenPipeError，不会杀掉整个 app）。
+    注意：tvbox-silicon 的 C 桥用的是 CPython 3.14 的 PEP 741
+    `PyInitConfig` API（不透明配置，运行时 dlsym），BeeWare 3.13
+    根本不导出这些符号，所以它的 `ApplePython.c` **无法逐字移植**，
+    这里移植的是做法（once 启动、缓存失败、配置项、信号处理），
+    不是逐字复制。`EmbeddedPythonHost.swift` 同理无法逐字移植
+    （它引用 Yingxia 自家的 Site / TVError / SerializedPluginWorker
+    等类型）。
+  - `Runtime/NodeHost/NodeBridge.mm`：Node 启动线程显式设 2 MB 栈
+    （`pthread_attr_setstacksize(2 << 20)`），移植自 tvbox-silicon
+    `EmbeddedNodeHost.launch` 的 `thread.stackSize = 2 << 20`。
+    之前 `pthread_create` 用默认属性，iOS 上副线程默认栈只有
+    512 KB，低于 V8 的栈需求。
+  - `Runtime/NodeHost/NodeHost.swift`：`isAvailable` 除检查
+    `host.mjs` / `worker.mjs` 外，也检查 `NodeMobile.framework` 二
+    进制是否存在（与 tvbox-silicon `EmbeddedNodeHost.available`
+    一致）；`ensureStarted()` 里 `startTask` 的检查与设置改成在
+    `NSLock` 下原子完成，两个并发猫源调用不会启动两次 Node。
+  - **核查（只读代码，未改逻辑）**：`App/HomeView.swift` 的
+    `loadHome()` 确实会 try 每一个源、失败就 `continue` 试下一个，
+    首页空是因为两个源都真的失败/无内容，不是第一个源失败就停了
+    （v2.1.0 截图里首页无红字，是因为截图时还在加载中，
+    `isLoading` 为真时空状态不渲染）；`NodeHost.isAvailable`
+    在 v2.1 改成包根目录后是正确的（与 IPA 清单一致）。
+  - 版本：2.1.1 / build 4（project.yml 与 Info.plist 同步）。
+  - **仍未验证**：第一次初始化失败的真正原因（v2.1.1 只保证如果
+    再次失败，报错会是第一次的真实原因，而不是 "failed to read
+    thread state"）；初始化是否真的在串行队列上只跑一次；9280 猫
+    源在 v2.1.0 上为什么也没出内容（用户截图里没有 Node 报错，
+    需要真机上再看）。
 
 ## v2.1 改了什么（相对 v2）
 
@@ -86,8 +176,9 @@ v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
   的相关部分——tvbox-silicon 的 `Docs/python-runtime-plan.md` 全文与
   `Runtime/NodeHost/` 目录清单；`dongxipaopao/marcotv` 是 Android
   TV 启动器（不是播放器），没有可借鉴的播放器/源代码；上游
-  MarcoMovie 的 `docs/native-python-source-profile.md` 当时抓取返回
-  HTTP 503 未读到，Python 加载部分沿用 2026-11-27 的调研结论。
+  MarcoMovie 的 `docs/native-python-source-profile.md` 在 v2.1 时抓取
+  返回 HTTP 503 未读到，v2.1.1 时通过 raw.githubusercontent.com 读到
+  了全文（见“v2.1.1 改了什么”）。
   **许可证**：两个项目都是 GPL-3.0。v2.1 只借鉴设计与做法（标准库分
   阶段打包、Node 控制协议、设置分区思路），YiPlayer 的代码是原创实现，
   没有整段复制它们的代码；如果之后往 YiPlayer 里抄了它们的代码，
@@ -393,3 +484,41 @@ v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
 - 补充：用户后来给了 classic PAT（custom.github-pat），接口
   403 的限制解除——workflow 文件、日志下载、二进制上传都
   可以直接走 API，不用再经网页上传。
+
+## 移植与许可证（v2.1.1 更新）
+
+用户在 v2.1.1 明确要求：那两个参考都在他 GitHub 库里，可以直接移植
+相关代码来实现功能，不用再坚持“只借鉴设计、自己重写”。实际执行情况：
+
+- **读过的参考文件**（2026-11-27，均为只读，未执行其中任何脚本）：
+  - `dongxipaopao/tvbox-silicon`（fork）：`Runtime/AppleRuntime/Native/ApplePython.c`
+    （全文）、`Sources/TVCore/EmbeddedPythonHost.swift`（全文）、
+    `Sources/TVCore/EmbeddedNodeHost.swift`（全文）、
+    `Docs/python-runtime-plan.md`（全文）、`Runtime/NodeHost/main.mjs` /
+    `worker.mjs`（v2 时核对过控制协议）。
+  - 上游 `Pilipala9919/MarcoMovie`：`docs/native-python-source-profile.md`
+    （全文，v2.1.1 读到）。`dongxipaopao/marcotv` 这个 fork 本身是
+    Android TV 启动器，没有播放器代码；播放器在上游 MarcoMovie 的
+    `tvos/`、`shared/catpaw/`、`flutter/` 里。
+- **移植了的做法**（改动处只改必须适配 YiPlayer 的部分，来源写在代码
+  注释里）：Python 初始化 exactly-once + 缓存失败（对应 tvbox-silicon
+  的 `dispatch_once_f` + `failure` 字符串）、`config.executable` /
+  `utf8_mode` / `write_bytecode` / `install_signal_handlers` /
+  SIGPIPE 与 SIGXFSZ 忽略（对应其 `configure()`）、Node 线程 2 MB 栈
+  （对应 `EmbeddedNodeHost.launch` 的 `thread.stackSize = 2 << 20`）、
+  `isAvailable` 同时检查框架二进制（对应其 `available`）。
+- **没有逐字复制的**：tvbox-silicon 的 `ApplePython.c` 逐字移植不了——
+  它用 CPython 3.14 的 PEP 741 `PyInitConfig` API（运行时 dlsym），
+  BeeWare 3.13 不导出这些符号，逐字复制连链接都过不了；
+  `EmbeddedPythonHost.swift` 也逐字移植不了（它引用 Yingxia 自家的
+  Site / TVError / SerializedPluginWorker / PluginDownloads 等类型）。
+  YiPlayer 这两个文件的代码仍是原创实现，只是按参考实现的做法改的。
+  MarcoMovie 的播放器 / 界面代码 v2.1.1 没有移植：当前卡住的是运行
+  时层（源不出内容），不是播放器，播放器只有在源返回内容后才能验证，
+  现在移植属于无验证目标的重写。
+- **许可证后果（如实记录）**：tvbox-silicon 与 MarcoMovie 都是
+  GPL-3.0-only。v2.1.1 没有往 YiPlayer 里逐字复制它们的文件，所以
+  YiPlayer 目前仍按原创实现对待；但只要之后有任何逐字移植（哪怕
+  只有一处），YiPlayer 就要按 GPL 对待——保留原始文件的许可证头与
+  作者署名；如果之后把 IPA 对外分发，对应源码也要提供（即使仓库是
+  私有的）。这一点同样写在 README.md 的“许可证注意”里。
