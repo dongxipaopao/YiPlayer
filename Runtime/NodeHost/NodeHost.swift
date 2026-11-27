@@ -142,7 +142,7 @@ public final class NodeHost {
                      params: [String: Any]) async throws -> String {
         try await ensureStarted()
         guard let control else { throw SourceError.parse("Node.js 控制端口未知") }
-        var body: [String: Any] = ["bundle": bundle, "api": api, "profile": profile,
+        let body: [String: Any] = ["bundle": bundle, "api": api, "profile": profile,
                                    "params": params]
         let data = try JSONSerialization.data(withJSONObject: body)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(control.port)/call")!)
@@ -156,9 +156,9 @@ public final class NodeHost {
             // Suspend took the socket back: ask host.mjs to re-listen,
             // then try once more on the (possibly new) port.
             await relisten()
-            guard let control else { throw error }
-            request.url = URL(string: "http://127.0.0.1:\(control.port)/call")
-            request.setValue(control.token, forHTTPHeaderField: "x-yingxia-token")
+            guard let fresh = self.control else { throw error }
+            request.url = URL(string: "http://127.0.0.1:\(fresh.port)/call")
+            request.setValue(fresh.token, forHTTPHeaderField: "x-yingxia-token")
             return try await perform(request: request)
         }
     }
