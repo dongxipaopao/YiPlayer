@@ -44,12 +44,10 @@ public final class PlayerViewModel: ObservableObject {
     public static let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0]
 
     public init() {
-        // HDR capability, checked once (AVPlayerItem.eligibleForHDRPlayback
-        // is the documented gate; there is no public "is DV supported" API).
-        if #available(iOS 17.0, *) {
-            // Kept simple in v1: the real check happens per-item below,
-            // because eligibility depends on the stream, not the device alone.
-        }
+        // HDR capability is NOT pre-checked in v1: AVPlayerItem has no
+        // eligibleForHDRPlayback member in this SDK. Playback is untouched
+        // passthrough; a device that cannot play an HDR stream reports
+        // CoreMedia -17223 through the failure observer in play().
     }
 
     public func load(item: VideoItem, episode: Episode, lines: [PlayLine],
@@ -82,7 +80,11 @@ public final class PlayerViewModel: ObservableObject {
         }
         let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let playerItem = AVPlayerItem(asset: asset)
-        isHDR = playerItem.eligibleForHDRPlayback
+        // NOTE: AVPlayerItem has no eligibleForHDRPlayback member in this
+        // SDK, so v1 does not pre-check HDR here. Playback itself is still
+        // untouched passthrough; if the device refuses an HDR stream,
+        // the failure observer below reports CoreMedia -17223 honestly.
+        isHDR = false
         player.replaceCurrentItem(with: playerItem)
         if resumeFrom > 5 {
             player.seek(to: CMTime(seconds: resumeFrom, preferredTimescale: 600))
@@ -94,13 +96,17 @@ public final class PlayerViewModel: ObservableObject {
         failureObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: playerItem, queue: .main
         ) { [weak self] note in
+            // The observer closure is Sendable, so MainActor-isolated
+            // state is only touched inside a MainActor task.
             let code = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError)?.code
-            // -17223 = CoreMedia cannot play this HDR stream on this device.
-            if code == -17223 {
-                self?.hdrUnsupported = true
-                self?.errorMessage = "这台设备无法播放这条 HDR / 杜比视界流，换一条线路或换 SDR 片源试试"
-            } else {
-                self?.errorMessage = "播放失败，换一条线路试试"
+            Task { @MainActor [weak self] in
+                // -17223 = CoreMedia cannot play this HDR stream on this device.
+                if code == -17223 {
+                    self?.hdrUnsupported = true
+                    self?.errorMessage = "这台设备无法播放这条 HDR / 杜比视界流，换一条线路或换 SDR 片源试试"
+                } else {
+                    self?.errorMessage = "播放失败，换一条线路试试"
+                }
             }
         }
     }
@@ -152,10 +158,12 @@ public final class PlayerViewModel: ObservableObject {
         if let observer = timeObserver { player.removeTimeObserver(observer) }
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self else { return }
-            self.position = time.seconds
-            self.duration = self.player.currentItem?.duration.seconds ?? 0
-            if self.duration.isNaN || self.duration.isInfinite { self.duration = 0 }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.position = time.seconds
+                self.duration = self.player.currentItem?.duration.seconds ?? 0
+                if self.duration.isNaN || self.duration.isInfinite { self.duration = 0 }
+            }
         }
     }
 
