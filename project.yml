@@ -1,10 +1,18 @@
-# YiPlayer — XcodeGen project (v2)
+# YiPlayer — XcodeGen project (v2.1)
 # Generates YiPlayer.xcodeproj. No Swift Package dependencies (SPM deps: 0)
 # on purpose: the first GitHub Actions build has fewer failure modes.
 # Local:  xcodegen generate   (macOS + Xcode only)
 # CI:     see .github/workflows/build-ios.yml
 #
-# v2 additions vs v1:
+# v2.1 additions vs v2.0:
+#  - vendor/python-stdlib (folder reference, staged by
+#    Scripts/fetch-python.sh from the BeeWare xcframework — the stdlib
+#    does NOT live in Python.framework, see ApplePython.c): the
+#    interpreter reads python-stdlib/python3.13 from the bundle.
+#  - Runtime/NodeHost/host.mjs + worker.mjs are bundle-ROOT resources
+#    (project.yml lists them that way); NodeHost.swift now looks for
+#    them at the bundle root, not in a nodehost/ subdir (v2.0.0 looked
+#    in the wrong place and always reported "Node.js 未包含").
 #  - YiPlayer.xcassets (white + Y film + alpaca icon, generated 2026-11-27)
 #    wired in: ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon.
 #  - Runtime/PythonHost (C bridge + Swift host) and Runtime/NodeHost
@@ -18,8 +26,6 @@
 #  - Resources: spiders/ as a folder reference (keeps base/ layout),
 #    host.mjs + worker.mjs as bundle resources.
 #  - SWIFT_OBJC_BRIDGING_HEADER for the two C bridges.
-#  - HEADER_SEARCH_PATHS for the NodeMobile slice Headers (the exact
-#    <node/node.h> layout is UNVERIFIED — first CI log decides).
 #  - ATS keys are set here AND in App/Info.plist (belt and braces; the
 #    v1 ATS error for http://www.y456y.com happened even though the key
 #    was already in Info.plist — see BUILD_NOTES.md).
@@ -34,8 +40,8 @@ settings:
   base:
     PRODUCT_NAME: YiPlayer
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "2.0.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "2.1.0"
+    CURRENT_PROJECT_VERSION: "3"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad 通用（用户 2026-11-27 决定：先做手机+iPad 通用 IPA，测试没问题后再做 tvOS）
     SUPPORTS_MACCATALYST: NO
@@ -69,6 +75,13 @@ targets:
       - path: YiPlayer.xcassets
       - path: Runtime/PythonHost/spiders
         type: folder
+      # v2.1: the CPython stdlib, staged by Scripts/fetch-python.sh
+      # from the BeeWare xcframework (vendor/python-stdlib/python3.13
+      # + lib-dynload). Folder reference so the bundle keeps the
+      # layout: python-stdlib/python3.13/os.py. MUST exist at
+      # `xcodegen generate` time — CI stages it before xcodegen runs.
+      - path: vendor/python-stdlib
+        type: folder
       - path: Runtime/NodeHost/host.mjs
         buildPhase: resources
       - path: Runtime/NodeHost/worker.mjs
@@ -84,8 +97,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: YiPlayer
-        CFBundleShortVersionString: "2.0.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "2.1.0"
+        CFBundleVersion: "3"
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
