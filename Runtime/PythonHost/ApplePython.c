@@ -155,7 +155,7 @@ static int initializeInner(const char *frameworkPath,
     // is required — Py_PreInitialize must not be called twice.
     {
         PyPreConfig preconfig;
-        PyPreConfig_InitIsolatedPreConfig(&preconfig);
+        PyPreConfig_InitIsolatedConfig(&preconfig);
         preconfig.utf8_mode = 1;
         PyStatus pre = Py_PreInitialize(&preconfig);
         if (PyStatus_Exception(pre)) {
