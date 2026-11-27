@@ -40,5 +40,15 @@ struct ContentView: View {
             SearchView().tabItem { Label("搜索", systemImage: "magnifyingglass") }.tag(Tab.search)
             SettingsView().tabItem { Label("设置", systemImage: "gearshape.fill") }.tag(Tab.settings)
         }
+        // v2.1: HomeView's empty-state "导入订阅源" button jumps here.
+        .onReceive(NotificationCenter.default.publisher(for: .yiplayerShowSettings)) { _ in
+            selection = .settings
+        }
     }
+}
+
+extension Notification.Name {
+    /// Posted when a view wants the Settings tab (e.g. HomeView's
+    /// empty-state import button). ContentView switches the tab.
+    static let yiplayerShowSettings = Notification.Name("YiPlayerShowSettings")
 }
