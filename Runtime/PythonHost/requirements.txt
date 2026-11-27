@@ -1,0 +1,21 @@
+# Python packages for the embedded CPython runtime (v2).
+#
+# Installed by CI (.github/workflows/build-ios.yml) into
+# Runtime/PythonHost/spiders/site-packages — NOT committed.
+#
+# ONLY pure-Python wheels are allowed: iOS cannot load compiled
+# extension modules from PyPI wheels (no wheels are built for
+# ios-arm64), and the embedded interpreter has no compiler at runtime.
+# Every package below ships a py3-none-any wheel; that is checked by
+# the workflow (pip --only-binary=:all: + a post-install scan that
+# fails the build if any .so file appears in site-packages).
+#
+# pd.py (dongpian17.com) needs exactly one third-party package:
+# requests. The rest are its dependencies. No lxml / bs4 / pyquery /
+# pycryptodome: pd.py never imports them (it parses JSON only), so
+# they are deliberately NOT installed — see BUILD_NOTES.md.
+requests==2.32.3
+urllib3==2.2.2
+idna==3.7
+charset-normalizer==3.3.2
+certifi==2024.7.4
