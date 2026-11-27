@@ -1,4 +1,4 @@
-# YiPlayer — XcodeGen project (v2.1)
+# YiPlayer — XcodeGen project (v2.1.2)
 # Generates YiPlayer.xcodeproj. No Swift Package dependencies (SPM deps: 0)
 # on purpose: the first GitHub Actions build has fewer failure modes.
 # Local:  xcodegen generate   (macOS + Xcode only)
@@ -29,6 +29,9 @@
 #  - ATS keys are set here AND in App/Info.plist (belt and braces; the
 #    v1 ATS error for http://www.y456y.com happened even though the key
 #    was already in Info.plist — see BUILD_NOTES.md).
+# v2.1.2: no project-structure change — only version 2.1.2 / build 5.
+# (Code changes are in Runtime/PythonHost/ApplePython.c/.h and
+# YiCore/CatSource.swift; see BUILD_NOTES.md.)
 name: YiPlayer
 options:
   bundleIdPrefix: com.yiplayer
@@ -40,8 +43,8 @@ settings:
   base:
     PRODUCT_NAME: YiPlayer
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "2.1.1"
-    CURRENT_PROJECT_VERSION: "4"
+    MARKETING_VERSION: "2.1.2"
+    CURRENT_PROJECT_VERSION: "5"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad 通用（用户 2026-11-27 决定：先做手机+iPad 通用 IPA，测试没问题后再做 tvOS）
     SUPPORTS_MACCATALYST: NO
@@ -97,8 +100,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: YiPlayer
-        CFBundleShortVersionString: "2.1.1"
-        CFBundleVersion: "4"
+        CFBundleShortVersionString: "2.1.2"
+        CFBundleVersion: "5"
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
