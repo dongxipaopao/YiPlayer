@@ -34,7 +34,10 @@ struct HomeView: View {
                             subtitle: subscriptions.allSources.isEmpty
                                 ? "导入一个订阅源（猫源 / TVBox JSON），就能在这里看到片库。"
                                 : "这个源没有返回首页内容，试试发现页或搜索。",
-                            actionTitle: subscriptions.allSources.isEmpty ? "导入订阅源" : nil)
+                            actionTitle: subscriptions.allSources.isEmpty ? "导入订阅源" : nil,
+                            action: subscriptions.allSources.isEmpty
+                                ? { NotificationCenter.default.post(name: .yiplayerShowSettings, object: nil) }
+                                : nil)
                     } else {
                         PosterWall(items: items) { selectedItem = $0 }
                     }
@@ -57,9 +60,13 @@ struct HomeView: View {
         // v2: try EVERY source in order, first non-empty home wins.
         // v1 only tried the first source and showed its error — if the
         // first source was the (then broken) 9280 cat source, home was
-        // an error even though 懂片帝 would have worked. A cancelled
-        // task (view scrolled away / refresh interrupted) is not an
-        // error and must not paint a red "cancelled" on the home page.
+        // an error even though 懂片帝 would have worked.
+        // v2.1: a cancelled load is not an error. CancellationError is
+        // only half the story — a cancelled URLSession task throws
+        // URLError(.cancelled), whose text is the bare word
+        // "cancelled". Both go through isCancellation, and the message
+        // goes through displayableErrorMessage, so a red "cancelled"
+        // can never appear on the home page again.
         isLoading = true
         defer { isLoading = false }
         var lastError: Error?
@@ -71,15 +78,14 @@ struct HomeView: View {
                     errorMessage = nil
                     return
                 }
-            } catch is CancellationError {
-                return
             } catch {
+                if isCancellation(error) { return }
                 lastError = error
                 continue
             }
         }
-        if items.isEmpty, let lastError {
-            errorMessage = lastError.localizedDescription
+        if items.isEmpty {
+            errorMessage = lastError.flatMap(displayableErrorMessage)
         }
     }
 }
@@ -162,6 +168,10 @@ struct EmptyStateView: View {
     var title: String
     var subtitle: String
     var actionTitle: String?
+    /// v2.1: the action used to be styled text that did nothing when
+    /// tapped. It is a real button now (HomeView wires it to the
+    /// Settings tab); nil keeps the old text-only state.
+    var action: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 12) {
@@ -171,10 +181,18 @@ struct EmptyStateView: View {
             Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).padding(.horizontal, 32)
             if let actionTitle {
-                Text(actionTitle).font(.subheadline).bold()
-                    .padding(.horizontal, 20).padding(.vertical, 10)
-                    .background(Color.accentColor, in: Capsule())
-                    .foregroundStyle(.white)
+                if let action {
+                    Button(actionTitle, action: action)
+                        .font(.subheadline).bold()
+                        .padding(.horizontal, 20).padding(.vertical, 10)
+                        .background(Color.accentColor, in: Capsule())
+                        .foregroundStyle(.white)
+                } else {
+                    Text(actionTitle).font(.subheadline).bold()
+                        .padding(.horizontal, 20).padding(.vertical, 10)
+                        .background(Color.accentColor, in: Capsule())
+                        .foregroundStyle(.white)
+                }
             }
         }
         .frame(maxWidth: .infinity)
