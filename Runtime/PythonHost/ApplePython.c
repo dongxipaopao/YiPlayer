@@ -57,6 +57,39 @@
 //    original license headers and attribution, and provide the
 //    corresponding source when distributing the IPA) — see
 //    BUILD_NOTES.md.
+//  * v2.1.2 — WHY module_search_paths IS NOT TRUSTED ANY MORE (read
+//    this before "fixing" the search paths back into the config):
+//    v2.1.1 initialised fine on device (error 4, "failed to read
+//    thread state", was gone) but then failed with "cannot import
+//    _yi_bridge" (error 5). The interpreter's own sys.path never
+//    contained spidersDir, even though this file appends it to
+//    PyConfig.module_search_paths before init. Proven on real CPython
+//    3.12 with the same config shape (/tmp/pyexp/pyconfig_test*.c,
+//    2026-11-28): four variants — fake home + Py_PreInitialize, fake
+//    home without it, real home (/usr), no home at all — ALL end with
+//    sys.path = only the home/prefix-derived defaults
+//    (python312.zip, lib/python3.12, lib-dynload) and
+//    `import _yi_bridge` failing with exactly ModuleNotFoundError
+//    (the device error 5, reproduced). Mechanism, from CPython
+//    source: Py_InitializeFromConfig -> pyinit_core ->
+//    _PyConfig_Read(..., 0) (path config NOT computed here) ->
+//    pyinit_main -> init_interp_main ->
+//    _PyConfig_InitImportConfig -> _PyConfig_InitPathConfig(config, 1),
+//    which runs the frozen getpath.py and recomputes
+//    module_search_paths from home/prefix/stdlib_dir, discarding the
+//    hand-set entries. Dropping config.home does NOT help (the no-home
+//    variant proves it). The fix, verified in the same experiment
+//    (variant D): AFTER Py_InitializeFromConfig succeeds, insert the
+//    intended directories into sys.path explicitly
+//    (PySys_GetObject("path") + PyList_Insert, skipping entries
+//    already present), then import _yi_bridge — the import succeeds
+//    and call_spider is present. So the config appends below are kept
+//    only as documentation of intent; the post-init insert in
+//    initializeInner is what actually puts spiders on sys.path.
+//    The same change also captures the real exception (type, message,
+//    traceback via the traceback module) plus a sys.path dump into
+//    YiPythonLastError when the import still fails, so the next device
+//    test reports the true reason instead of a guess.
 #include "ApplePython.h"
 
 #include <Python/Python.h>
@@ -81,7 +114,10 @@ static PyObject *g_bridgeModule = NULL; // spiders/_yi_bridge.py, imported once
 // Last initialisation failure, for YiPythonLastError: the PyStatus
 // message plus the paths that were tried. v2.0.0 only surfaced
 // "错误码 4", which said nothing about WHY init failed.
-static char g_lastError[2048] = "";
+// v2.1.2: 8192 bytes — an import failure now records the real Python
+// exception (type + message + traceback) plus a dump of sys.path, and
+// that text needs the room.
+static char g_lastError[8192] = "";
 
 static void setLastError(const char *fmt, ...) {
     va_list args;
@@ -113,6 +149,121 @@ static int addSearchPath(PyConfig *config, const char *path) {
     return 0;
 }
 
+// Append formatted text to a fixed buffer, never overflowing.
+// Returns the new offset (size - 1 once the buffer is full).
+static size_t appendf(char *buf, size_t size, size_t off, const char *fmt, ...) {
+    if (off >= size) return off;
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(buf + off, size - off, fmt, args);
+    va_end(args);
+    if (n < 0) return off;
+    size_t next = off + (size_t)n;
+    return next < size ? next : size - 1;
+}
+
+// Insert one directory at the FRONT of sys.path unless it is already
+// there. Must be called with the GIL held, after init succeeded.
+// See the v2.1.2 header note: PyConfig.module_search_paths is
+// recomputed away during init, so this post-init insert is the only
+// thing that actually puts a directory on sys.path.
+static int ensureSysPathEntry(const char *dir) {
+    PyObject *sysPath = PySys_GetObject("path");
+    if (!sysPath || !PyList_Check(sysPath)) {
+        fprintf(stderr, "[YiPython] sys.path is not a list\n");
+        return -1;
+    }
+    PyObject *entry = PyUnicode_FromString(dir);
+    if (!entry) return -1;
+    int contains = PySequence_Contains(sysPath, entry);
+    if (contains < 0) { Py_DECREF(entry); return -1; }
+    int rc = 0;
+    if (contains == 0 && PyList_Insert(sysPath, 0, entry) < 0) rc = -1;
+    Py_DECREF(entry);
+    return rc;
+}
+
+// Record the REAL Python exception behind a failed _yi_bridge import:
+// type, message, full traceback (via the traceback module) and a dump
+// of sys.path at import time. Consumes the current exception; must be
+// called with the GIL held. Replaces the v2.1.1 behaviour, which only
+// PyErr_Print()ed to stderr (invisible on a device) and showed the UI
+// a guessed "is spidersDir on sys.path?".
+static void capturePythonError(const char *context, const char *spidersDir) {
+    PyObject *type = NULL, *value = NULL, *tb = NULL;
+    PyErr_Fetch(&type, &value, &tb);
+    PyErr_NormalizeException(&type, &value, &tb);
+
+    char buf[8192];
+    size_t off = 0;
+    off = appendf(buf, sizeof(buf), off, "%s (spidersDir %s): ",
+                  context, spidersDir ? spidersDir : "(none)");
+
+    // Exception type + message.
+    const char *typeName = "unknown";
+    if (type && PyType_Check(type)) {
+        const char *name = PyType_GetName((PyTypeObject *)type);
+        if (name) typeName = name;
+    }
+    PyObject *messageObj = value ? PyObject_Str(value) : NULL;
+    const char *message = messageObj ? PyUnicode_AsUTF8(messageObj) : NULL;
+    off = appendf(buf, sizeof(buf), off, "%s: %s",
+                  typeName, message ? message : "(no message)");
+    Py_XDECREF(messageObj);
+
+    // Full traceback via traceback.format_exception(exc) (1-arg form,
+    // current API since 3.10). If that fails, the type + message above
+    // is still the answer — clear the secondary error and carry on.
+    if (value) {
+        PyObject *tbmod = PyImport_ImportModule("traceback");
+        PyObject *lines = NULL;
+        PyObject *joined = NULL;
+        if (tbmod) {
+            PyObject *fmt = PyObject_GetAttrString(tbmod, "format_exception");
+            if (fmt && PyCallable_Check(fmt)) {
+                lines = PyObject_CallFunctionObjArgs(fmt, value, NULL);
+            }
+            Py_XDECREF(fmt);
+            Py_DECREF(tbmod);
+        }
+        if (lines && PyList_Check(lines)) {
+            PyObject *sep = PyUnicode_FromString("");
+            if (sep) {
+                joined = PyUnicode_Join(sep, lines);
+                Py_DECREF(sep);
+            }
+        }
+        Py_XDECREF(lines);
+        if (joined) {
+            const char *text = PyUnicode_AsUTF8(joined);
+            if (text) off = appendf(buf, sizeof(buf), off, "\n%s", text);
+            Py_DECREF(joined);
+        }
+        if (PyErr_Occurred()) PyErr_Clear();
+    }
+
+    // sys.path at import time, item by item (capped at 24 entries).
+    PyObject *sysPath = PySys_GetObject("path");
+    if (sysPath && PyList_Check(sysPath)) {
+        off = appendf(buf, sizeof(buf), off, " sys.path=[");
+        Py_ssize_t n = PyList_Size(sysPath);
+        for (Py_ssize_t i = 0; i < n && i < 24; i++) {
+            PyObject *item = PyList_GetItem(sysPath, i);
+            const char *s = item ? PyUnicode_AsUTF8(item) : NULL;
+            off = appendf(buf, sizeof(buf), off, "%s%s", i ? ", " : "", s ? s : "?");
+        }
+        if (n > 24) off = appendf(buf, sizeof(buf), off, ", ... (%zd total)", n);
+        off = appendf(buf, sizeof(buf), off, "]");
+    } else {
+        off = appendf(buf, sizeof(buf), off, " sys.path=(unavailable)");
+    }
+
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(tb);
+    setLastError("%s", buf);
+}
+
 static int initializeInner(const char *frameworkPath,
                            const char *stdlibDir,
                            const char *dynloadDir,
@@ -137,6 +288,21 @@ static int initializeInner(const char *frameworkPath,
         return 1;
     }
     fclose(osPy);
+
+    // v2.1.2: same fail-fast probe for the bridge itself. v2.1.1 only
+    // checked os.py, so a bundle without spiders/_yi_bridge.py failed
+    // later at the import with the misleading "is spidersDir on
+    // sys.path?" guess. The file is a folder-reference resource
+    // (spiders/_yi_bridge.py); under LiveContainer the bundle lives
+    // under Documents/Applications/<bundle>.app/, so the exact path
+    // in the error is the diagnosis.
+    snprintf(probe, sizeof(probe), "%s/_yi_bridge.py", spidersDir);
+    FILE *bridgePy = fopen(probe, "r");
+    if (!bridgePy) {
+        setLastError("_yi_bridge.py not found at %s (spiders folder was not bundled)", probe);
+        return 1;
+    }
+    fclose(bridgePy);
 
     PyConfig config;
     PyConfig_InitIsolatedConfig(&config);
@@ -218,6 +384,10 @@ static int initializeInner(const char *frameworkPath,
     // Order matters: a user file named like a bundled one must win.
     // lib-dynload goes right after the stdlib so the C extension
     // modules (_socket, _ssl, _hashlib, ...) resolve.
+    // v2.1.2: these appends are kept as documentation of intent, but
+    // they are NOT relied on — init recomputes them away (see the
+    // header note). The post-init sys.path insert after
+    // Py_InitializeFromConfig is what actually takes effect.
     if (addSearchPath(&config, stdlibDir) != 0 ||
         (dynloadDir && addSearchPath(&config, dynloadDir) != 0) ||
         addSearchPath(&config, documentsSpidersDir) != 0 ||
@@ -237,14 +407,38 @@ static int initializeInner(const char *frameworkPath,
         return 4;
     }
 
+    PyGILState_STATE gil = PyGILState_Ensure();
+    // v2.1.2: put the intended search paths on sys.path NOW. The
+    // config's module_search_paths were recomputed away during init
+    // (see the header note) — without this insert, _yi_bridge is not
+    // importable even though the file is in the bundle. Insert in
+    // reverse priority order at position 0, so the final order is the
+    // intended one: stdlib, dynload, user spiders, bundled spiders,
+    // site-packages. Entries already on sys.path (stdlib, dynload)
+    // are left where they are. Verified on real CPython 3.12
+    // (variant D, /tmp/pyexp): after this insert, the import succeeds.
+    {
+        const char *dirs[5] = { sitePackagesDir, spidersDir, documentsSpidersDir, dynloadDir, stdlibDir };
+        for (int i = 0; i < 5; i++) {
+            if (!dirs[i]) continue;
+            if (ensureSysPathEntry(dirs[i]) != 0) {
+                setLastError("cannot put %s on sys.path after init", dirs[i]);
+                if (PyErr_Occurred()) PyErr_Clear();
+                PyGILState_Release(gil);
+                return 6;
+            }
+        }
+    }
+
     // Import the thin Python-side bridge (spiders/_yi_bridge.py). It owns
     // spider caching, argument conversion and error wrapping, so this C
     // file never has to know a spider's interface.
-    PyGILState_STATE gil = PyGILState_Ensure();
     PyObject *bridge = PyImport_ImportModule("_yi_bridge");
     if (!bridge) {
-        setLastError("cannot import _yi_bridge (is spidersDir %s on sys.path?)", spidersDir);
-        PyErr_Print();
+        // v2.1.2: capture the real exception (type + message +
+        // traceback) and the sys.path at import time — no more guessed
+        // "is spidersDir on sys.path?".
+        capturePythonError("cannot import _yi_bridge", spidersDir);
         PyGILState_Release(gil);
         return 5;
     }
