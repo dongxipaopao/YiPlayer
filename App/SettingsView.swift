@@ -100,7 +100,7 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .fileImporter(isPresented: $showFilePicker,
-                          allowedContentTypes: [.json, .javascript, .pythonScript, .plainText, .data],
+                          allowedContentTypes: [.json, UTType(filenameExtension: "js") ?? .sourceCode, .pythonScript, .plainText, .data],
                           allowsMultipleSelection: false) { result in
                 importFromFile(result: result)
             }
