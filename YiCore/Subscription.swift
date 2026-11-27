@@ -2,12 +2,14 @@ import Foundation
 
 // MARK: - Subscription
 // One imported subscription: a URL (or local file) that yields sources.
-// Supported inputs (v1):
+// Supported inputs (v2):
 //  - TVBox JSON: { "sites": [ { "key","name","type":1|4,"api", ... } ] }
 //  - Cat bundle: a .js / .js.md5 URL (see CatSource.swift — the .md5 is a
 //    checksum file, not the bundle itself; the bundle is fetched at the
 //    same URL minus the ".md5" suffix and its hash is verified).
-//  - Local file: a .json / .txt / .js file imported from the Files app.
+//  - Py spider: a .py file (pd.py or any CatVod py spider), run by the
+//    embedded CPython host (see PySource.swift).
+//  - Local file: a .json / .txt / .js / .py file imported from the Files app.
 // Failure policy (Yingxia SubscriptionMerge): a failed refresh NEVER
 // wipes the last good config — the old sources stay usable and the
 // error is shown next to the subscription instead.
@@ -24,6 +26,7 @@ public struct Subscription: Identifiable, Hashable, Codable {
     public enum Kind: String, Codable, Hashable {
         case tvboxJSON
         case catBundle
+        case pySpider
         case localFile
     }
 
@@ -48,7 +51,48 @@ public final class SubscriptionStore: ObservableObject {
     private let defaultsKey = "yiplayer.subscriptions.v1"
     private let defaults = UserDefaults.standard
 
-    public init() { load() }
+    public init() {
+        load()
+        seedDefaultsIfNeeded()
+    }
+
+    /// First launch (v2): the app must not open empty. v1 shipped with
+    /// zero sources, so "nothing runs" until the user finds the import
+    /// page — that is exactly what the user reported. Seed the two
+    /// sources the user actually uses, once, and let them delete or
+    /// add more in Settings:
+    ///   1. 懂片帝 (py, bundled pd.py) — homeVideoContent works on
+    ///      first launch, no import needed.
+    ///   2. 9280 猫源 (cat, .md5 URL) — the Node.js server bundle.
+    /// Runs only when there are no subscriptions at all AND the seed
+    /// flag was never set, so a user who deleted everything on purpose
+    /// does not get them back.
+    private func seedDefaultsIfNeeded() {
+        guard subscriptions.isEmpty,
+              !UserDefaults.standard.bool(forKey: "yiplayer.seeded.v2") else { return }
+        UserDefaults.standard.set(true, forKey: "yiplayer.seeded.v2")
+        var seeded: [Subscription] = []
+        if let pdURL = Bundle.main.url(forResource: "pd", withExtension: "py",
+                                       subdirectory: "spiders") {
+            let id = UUID()
+            let source = Source(id: "py-dongpian", name: "懂片帝", kind: .py,
+                                api: pdURL, spider: "pd.py",
+                                subscriptionID: id.uuidString)
+            seeded.append(Subscription(id: id, name: "懂片帝", url: pdURL,
+                                       kind: .pySpider, sources: [source],
+                                       lastGoodAt: Date()))
+        }
+        let catID = UUID()
+        let catSource = Source(id: "cat-9280", name: "9280 猫源", kind: .cat,
+                               api: SubscriptionImporter.defaultCatURL,
+                               subscriptionID: catID.uuidString)
+        seeded.append(Subscription(id: catID, name: "9280 猫源",
+                                   url: SubscriptionImporter.defaultCatURL,
+                                   kind: .catBundle, sources: [catSource],
+                                   lastGoodAt: Date()))
+        subscriptions = seeded
+        save()
+    }
 
     public var allSources: [Source] {
         subscriptions.flatMap(\.sources)
