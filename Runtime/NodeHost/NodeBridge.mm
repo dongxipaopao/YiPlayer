@@ -57,8 +57,19 @@ int YiNodeStart(const char *mainJs, const char *controlFile, const char *reliste
     if (!mainJs || !controlFile || !relistenFile) return 2;
     NodeArgs *args = new NodeArgs{std::string(mainJs), std::string(controlFile),
                                   std::string(relistenFile)};
+    // v2.1.1: Node runs on a thread with an explicit 2 MB stack,
+    // ported from tvbox-silicon's EmbeddedNodeHost.launch
+    // (thread.stackSize = 2 << 20). A pthread created with default
+    // attributes gets only 512 KB on iOS, which is below what V8's
+    // stack usage expects — node_start on a small stack is a crash
+    // waiting to happen, not a configuration choice.
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 2 << 20);
     pthread_t thread;
-    if (pthread_create(&thread, nullptr, &runNode, args) != 0) {
+    int err = pthread_create(&thread, &attr, &runNode, args);
+    pthread_attr_destroy(&attr);
+    if (err != 0) {
         delete args;
         return 3;
     }
