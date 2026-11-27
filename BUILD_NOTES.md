@@ -1,7 +1,7 @@
-# BUILD_NOTES.md — 假设与未验证项（v2.1.1）
+# BUILD_NOTES.md — 假设与未验证项（v2.1.2）
 
-本文件列出构建 YiPlayer v1 + v2 + v2.1 + v2.1.1 时做的每一个假设和每一条未验证的说法。
-**v2.1.1 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
+本文件列出构建 YiPlayer v1 + v2 + v2.1 + v2.1.1 + v2.1.2 时做的每一个假设和每一条未验证的说法。
+**v2.1.2 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
 macOS / Xcode；只做了 YAML 语法、Swift 括号平衡、Python/JS 语法、
 以及文件引用完整性等静态检查（见“已验证”）。
 v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
@@ -10,7 +10,143 @@ v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
 报了 4 个问题，v2.1 就是针对这 4 个问题修的（见“v2.1 改了什么”）；
 v2.1.0 也已构建成功（Actions run #37，31.3 MB IPA，见“v2.1 构建实录”），
 用户装后报 Python 仍失败（新报错带上了真实原因），v2.1.1 就是针对
-这个修的（见“v2.1.1 改了什么”）。
+这个修的（见“v2.1.1 改了什么”）；v2.1.1 也已构建成功（Actions
+run #48，31.3 MB IPA，v2.1.1 build 4），用户装后报
+Python 初始化已过、但 `_yi_bridge` 导入失败（错误码 5），v2.1.2
+就是针对这个修的（见“v2.1.2 改了什么”）。
+
+## v2.1.2 改了什么（相对 v2.1.1）
+
+用户在 LiveContainer 里装了 v2.1.1 后报（2026-11-28 00:10–00:12）：
+
+- 发现页 懂片帝：“解析失败：Python 运行时初始化失败（错误码 5）：
+  cannot import _yi_bridge (is spidersDir .../Documents/Applications/
+  com.yiplayer.app.app/spiders on sys.path?)”——"failed to read thread
+  state" **消失了**（v2.1.1 的 once 守卫 + 串行化起了作用，
+  `Py_InitializeFromConfig` 已成功）；失败点移到下一步的
+  `PyImport_ImportModule("_yi_bridge")`。
+- 发现页 9280 猫源：分类能出来（电影/连续剧/综艺纪录/动漫/短剧），
+  但没有任何内容条目；底部挂着同一条 Python 错误 5（切换 tab 时
+  旧的 errorMessage 要等新一轮 load 完成才清掉，截图时可能还在，
+  不是猫源调用走了 Python——见下“只读代码核查”）。
+- 搜索“奥德赛”：空，无报错。首页：转圈后空。设置页新 UI 正常，
+  三个订阅都在。
+
+### 根因：`PyConfig.module_search_paths` 在初始化中途被重算丢弃了
+
+证据是本机用真实 CPython 3.12、与 `ApplePython.c` 相同的配置形状
+做的对照实验（`/tmp/pyexp/pyconfig_test*.c`，2026-11-28，`gcc …
+$(python3-config --includes --ldflags --embed)` 编译运行；文件只
+import `importlib.util` / `json` / `os` / `sys` / `threading` 的
+`_yi_bridge.py` 复制件放在 `/tmp/pyexp/spiders/`）：
+
+| 变体 | 配置 | 初始化后 sys.path | spiders 在吗 | import _yi_bridge |
+|---|---|---|---|---|
+| A | 假 home + `Py_PreInitialize` | 仅 home 派生的默认项 | 否 | 失败 |
+| B | 假 home，不预初始化 | 同上 | 否 | 失败 |
+| C | 真 home（/usr），不预初始化 | 3 项：`python312.zip`、`lib/python3.12`、`lib-dynload` | 否 | 失败（`ModuleNotFoundError: No module named '_yi_bridge'`——与真机错误 5 同款） |
+| E | **不设 home** | 同 C 的 3 项 | 否 | 失败 |
+| **D** | 同 C，**初始化成功后**显式把 5 个目录插进 sys.path | 7 项，顺序为 dynload、docspiders、spiders、site-packages、3 项默认 | **是** | **成功，`call_spider` 存在** |
+
+五个变体里 `add_path`（`PyWideStringList_Append`）的返回值都检查过、
+没有失败——`module_search_paths` 确实填进去了，但初始化后
+`sys.path` 里一个都不剩。机制（读 CPython 3.12 源码）：
+`Py_InitializeFromConfig` → `pyinit_core` → `_PyConfig_Read(&config, 0)`
+（此时不算路径配置，注释原话 "don't compute the path configuration
+(it is computed in the main init)"）→ `pyinit_main` →
+`init_interp_main` → `_PyConfig_InitImportConfig` →
+`config_init_import(config, 1)` → `_PyConfig_InitPathConfig(config, 1)`
+跑冻结的 `getpath.py`，按 home/prefix/stdlib_dir 重算
+`module_search_paths`，手填的条目被丢弃。变体 E 证明**去掉
+`config.home` 也救不了**（重算与 home 无关）；只有变体 D 的
+“初始化成功后显式插入”管用。注意：getpath.py 本体这次没能读到
+（raw.githubusercontent.com 上 `Lib/getpath.py` 与
+`Python/getpath.py` 都返回 404），所以上面只写到
+`_PyConfig_InitPathConfig` 这一层，不编造 getpath.py 内部某一行
+的说法——行为本身已被 5 组实验钉死，修法不依赖那一行。
+
+改动（`Runtime/PythonHost/ApplePython.c/.h`）：
+- 初始化成功后、导入 `_yi_bridge` 之前，在 GIL 内把 5 个目录显式插
+  进 `sys.path`（新函数 `ensureSysPathEntry`：`PySys_GetObject("path")`
+  + `PyList_Insert` 到位置 0，已在的条目跳过不重复插；按反优先级
+  顺序插入，最终顺序与配置意图一致：stdlib、dynload、用户 spiders、
+  打包 spiders、site-packages）。插入失败是新错误码 **6**
+  （`cannot put <dir> on sys.path after init`）。配置里
+  `module_search_paths` 的 append 保留，只作为意图说明，不再被依赖。
+- 导入前加 `_yi_bridge.py` 存在性检查（与已有的 `os.py` 检查并排，
+  同一个“初始化前 fail-fast、报错写明精确路径”的做法；缺失时错误码 1，
+  报错写明完整路径，不再走到导入那步才猜）。
+- 导入再失败时不再只 `PyErr_Print()` 到 stderr（真机上看不见）加一句
+  猜测：新函数 `capturePythonError` 用 `PyErr_Fetch` +
+  `PyErr_NormalizeException` 取出异常，再用 `traceback` 模块的
+  `format_exception(exc)`（单参数形式，3.10+ 现行 API）拼出完整
+  traceback，并把导入那一刻的 `sys.path` 逐项写进错误（上限 24 项）；
+  文本进 `YiPythonLastError()`（缓冲区从 2048 扩到 8192 字节），
+  界面下次报的就是真正的原因。`traceback` 模块本身出问题时仍有
+  “类型 + 消息”兜底，不会丢了主错误。
+- Swift 侧（`YiCore/PySource.swift`）不用改：它已经原样透传
+  `YiPythonLastError()` 的文本，错误码 5/6 都会带上真实原因。
+
+### 顺带：猫源“有分类没内容、搜索没结果、界面一声不吭”
+
+只读代码核查（`YiCore/CatSource.swift`、`App/DiscoverView.swift`、
+`App/SearchView.swift`、`App/HomeView.swift`、
+`Runtime/NodeHost/host.mjs`、`Runtime/NodeHost/worker.mjs`）：
+
+- 路由本身是对的：`host.mjs` 按参数分发——有 `play` → `/play`，
+  `ids` → `/detail`，`wd` → `/search`，`t` → `/category`（body
+  `{id, page, filter: true, filters: {}}`），无参数 → `/home`；
+  `CatSource` 的 category / search / detail / home 传参分别对上这
+  四条。分类能出来证明 `/home` 通了且返回了 `class`。
+- 真正的问题在 `CatSource.items(from:)`：任何没有 `list` 的返回
+  （JSON 形状不对、错误对象、HTML、空串）都静默返回 `[]`，
+  `category()` 再以“成功、0 条”交回去，`DiscoverView` 只显示
+  “这个分类没有内容”，`errorMessage` 被置空；搜索同理（`host.mjs`
+  还会把空搜索正文与 404 都归一成 `{"list":[]}`）。Node 的真实
+  响应从来没到过界面——这就是“有分类没内容、搜不到、也不报错”
+  的全部解释，不用再猜是哪个接口调错了。
+- 改动（只改读代码能确认的这一处）：`CatSource` 新增严格解析
+  `items(from:route:)`，供 `/category`、`/search`、`/detail` 用——
+  返回里**有** `list`（哪怕是空数组）仍是正常空结果，不报错；
+  返回里**没有** `list`、或根本不是 JSON，就抛
+  `SourceError.parse`，把路由名和原始响应前 300 字写进错误。
+  `home()` 故意保留宽容解析：`/home` 合法时可以只有 `class`
+  没有 `list`，且 `HomeView` 本来就会依次试下一个源，空首页
+  的提示本身是诚实的。
+- 需要真机数据才能确认的（不要猜修法）：9280 bundle 的
+  `/category` 与 `/search` 实际返回什么（字段名、是否要求别的
+  body 字段、是否对 douban 站点根本没实现搜索）。本机这次没能
+  重新读到 bundle 全文（`https://9280.kstore.vip/cat/index.js`
+  抓取超时），所以没有改请求字段；v2.1.2 的严格报错就是为了
+  下次测试时把原始响应带回来，再按真实形状修。
+
+### 只读代码核查的其它结论
+
+- `App/HomeView.swift` 的 `loadHome()` 确实会 try 每一个源、失败就
+  `continue` 试下一个——首页空是因为两个源都真的失败/无内容，
+  不是第一个源失败就停了（v2.1.0 时已核查过一次，结论不变）。
+- 发现页切 tab 后旧报错短暂残留：`DiscoverView.load()` 是异步的，
+  新一轮 load 完成前旧的 `errorMessage` 还在界面上——截图里 9280
+  tab 下挂着 Python 错误 5 就是这么来的，不是猫源走了 Python。
+  这只是显示时序问题，这次没改（改动面控制在诊断与修法上）。
+
+### 版本与仍未验证
+
+- 版本：2.1.2 / build 5（project.yml 三处与 Info.plist 同步：
+  settings.base 的 MARKETING_VERSION / CURRENT_PROJECT_VERSION、
+  target info.properties 的 CFBundleShortVersionString /
+  CFBundleVersion、App/Info.plist——v2.1.1 run #47 的教训）。
+- **仍未验证（等 Actions 构建 + 真机测试）**：
+  ① `_yi_bridge` 在真机上是否真的导入成功（错误 5 是否消失）、
+  pd.py 是否返回内容/能播——这是本次最关键的验证项；
+  ② 9280 的 `/category` 与 `/search` 实际返回形状（等 v2.1.2
+  的严格报错把原始响应带回来）；
+  ③ `sys.path` 插入在 BeeWare 3.13（本机实验是系统 Python 3.12）
+  上是否同样生效——配置形状与初始化路径相同，但 3.13 的 getpath
+  未在本机复核，如果真机仍报导入失败，`YiPythonLastError` 里的
+  sys.path dump 会直接说明插入是否生效；
+  ④ 其余 v2.1 / v2.1.1 的未验证项（ATS、LiveContainer 文件浏览、
+  图标显示、冷启动时间）不变，见下。
 
 ## v2.1.1 改了什么（相对 v2.1）
 
