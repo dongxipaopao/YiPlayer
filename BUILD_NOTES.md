@@ -1,11 +1,106 @@
-# BUILD_NOTES.md — 假设与未验证项（v2）
+# BUILD_NOTES.md — 假设与未验证项（v2.1）
 
-本文件列出构建 YiPlayer v1 + v2 时做的每一个假设和每一条未验证的说法。
-**v2 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
+本文件列出构建 YiPlayer v1 + v2 + v2.1 时做的每一个假设和每一条未验证的说法。
+**v2.1 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
 macOS / Xcode；只做了 YAML 语法、Swift 括号平衡、Python/JS 语法、
 以及文件引用完整性等静态检查（见“已验证”）。
 v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
-见“v1 历史”），v2 的构建还没有跑过。
+见“v1 历史”）；v2 的构建也是真的（Actions run #22 成功，23.4 MB
+未签名 IPA，见“v2 构建实录”），用户已在 LiveContainer 里装了 v2.0.0，
+报了 4 个问题，v2.1 就是针对这 4 个问题修的（见“v2.1 改了什么”）。
+
+## v2.1 改了什么（相对 v2）
+
+用户在 LiveContainer 里装了 v2.0.0 后报了 4 个问题，v2.1 逐个修：
+
+- **根因 A：Python 初始化失败（错误码 4）——标准库根本没进包。**
+  证据（实测 BeeWare 3.13-b18 的 `Python-3.13-iOS-support.b18.tar.gz`，
+  本机解包验证）：标准库在 xcframework **根目录**的 `lib/python3.13`
+  （2,512 个文件，`os.py`、`encodings/__init__.py` 都在那）；设备扩展
+  模块在 `ios-arm64/lib-arm64/python3.13/lib-dynload/`（207 个 `.so`，
+  含 `_socket`、`_ssl`、`_hashlib`）；`Python.framework/` 里**只有**
+  二进制 + 头文件 + Info.plist。`PyConfig` 有 `stdlib_dir` 字段
+  （`cpython/initconfig.h` 第 198 行）和 `platlibdir`（第 193 行）。
+  旧路径（v2.0.0 错的） vs 新路径（v2.1）：
+  | | 旧（v2.0.0） | 新（v2.1） |
+  |---|---|---|
+  | 标准库 | `<Python.framework>/lib/python3.13`（不存在） | 包内 `python-stdlib/python3.13` |
+  | 扩展模块 | 未加入搜索路径 | `python-stdlib/python3.13/lib-dynload` |
+  | 打包方式 | 只拷 `.framework`（Xcode 行为） | `Scripts/fetch-python.sh` 把 `lib/python3.13` + 设备切片 `lib-dynload/*.so` 拷到 `vendor/python-stdlib/`，project.yml 以 folder reference 打进包 |
+  改动：`Scripts/fetch-python.sh` 重写（下载后分阶段打包标准库，剪掉
+  `test` / `idlelib` / `tkinter` / `turtledemo` / `ensurepip` /
+  `lib2to3`——与 Yingxia 的 python-runtime-plan 剪裁清单一致；缺
+  `os.py` / `encodings` / `_socket` / `_ssl` 就大声失败；本机已用预置
+  tarball 测过全新下载与缓存命中两条路，均分阶段 615 个文件 / 28 MB）；
+  `project.yml` 加 `- path: vendor/python-stdlib` folder reference
+  （CI 缓存键含 `Scripts/fetch-python.sh`，改脚本即失效缓存、下次重下）；
+  `Runtime/PythonHost/ApplePython.h/.c` 重写初始化（新 6 参签名，
+  显式设 `config.stdlib_dir`，`dynloadDir` 加进 `module_search_paths`，
+  失败时把 PyStatus 的 `err_msg` 和试过的路径记进 `YiPythonLastError()`）；
+  `YiCore/PySource.swift` 传新参数，初始化前先校验包内 `os.py` 是否存在，
+  失败信息里带上具体原因，不再只剩“错误码 4”。
+  参考来源：Yingxia `Docs/python-runtime-plan.md`（全文读过，2026-11-27；
+  它把每个扩展模块转成独立 `.fwork` 框架——BeeWare 包里实际没有 `.fwork`
+  文件，`.so` 直接放在 lib-dynload 里，YiPlayer 先用原样 `.so`，只在真机
+  证明 `.so` 加载失败时才考虑 Yingxia 的重打包做法）。
+
+- **根因 B：Node“未包含”——代码找错了目录。**
+  证据：v2.0.0 的 IPA 清单证实 `host.mjs` 与 `worker.mjs` 在包根目录
+  （`Payload/YiPlayer.app/host.mjs`），但 `NodeHost.swift` 的
+  `nodeHostDirURL` 去找 `Bundle.main.resourceURL/nodehost/` 子目录，
+  该目录不存在，所以 `isAvailable` 恒为 false。
+  改动：`nodeHostDirURL` 改成包根目录（`Bundle.main.resourceURL`）。
+  `host.mjs` 用 `new URL('./worker.mjs', import.meta.url)` 加载 worker，
+  是相对自身位置的相对引用——两个文件都在包根，引用不断。
+  启动失败时错误里带上实际查过的目录、入口与控制文件路径。
+  参考来源：tvbox-silicon `Runtime/NodeHost/` 目录清单（只有
+  `agents.mjs` / `main.mjs` / `worker.mjs` 三个文件，2026-11-27 读过）。
+
+- **首页红色 "cancelled"（C）**：v2.0.0 只 catch 了 `CancellationError`，
+  但被取消的 URLSession 任务抛的是 `URLError(.cancelled)`，
+  `localizedDescription` 就是裸的英文 "cancelled"，落进 `lastError`
+  显示出来。改动：`YiCore/Source.swift` 加共享 helper
+  `isCancellation(_:)`（CancellationError / URLError .cancelled /
+  NSUserCancelledError / 文本本身就是 "cancelled"）与
+  `displayableErrorMessage(_:)`（取消返回 nil，含 "cancelled" 的文案
+  也返回 nil）；Home / Discover / Search / Detail 全部走这两个 helper；
+  首页空状态的“导入订阅源”原来是点了没反应的样式文字，现在是真按钮，
+  点了跳到设置页（`YiPlayerApp.ContentView` 监听
+  `.yiplayerShowSettings` 通知切 tab）。
+
+- **设置页重做（D）**：订阅地址框下方放全宽显眼的“导入订阅”主按钮
+  （地址为空禁用，导入中转圈）；“已导入的订阅”单独成区；新增**应用内
+  文件浏览（主路径）**：列出 Documents / imports / spiders 里的
+  `.json` / `.js` / `.py` / `.txt`（含 `.md5`），按修改时间倒序，点一下
+  就导入，左滑删除，带刷新按钮，底部小字说明文件放法；系统文件选择器
+  保留为次要按钮；粘贴导入、猫源站点选择、播放说明、本机数据保留；
+  “关于”更新到 v2.1.0。导入逻辑抽成共享的 `importParsedFile(at:fileName:)`
+  （应用内浏览与选择器复制后共用）。
+
+- **诊断能力（E）**：Python 初始化失败时错误里带 PyStatus 的 `err_msg`
+  和试过的路径；Node 启动失败/超时时带实际查过的目录、入口与控制文件路径。
+
+- **版本（F）**：2.1.0 / build 3（project.yml 与 Info.plist 同步）。
+
+- **参考代码阅读（用户要求）**：2026-11-27 读了用户 GitHub 上两个 fork
+  的相关部分——tvbox-silicon 的 `Docs/python-runtime-plan.md` 全文与
+  `Runtime/NodeHost/` 目录清单；`dongxipaopao/marcotv` 是 Android
+  TV 启动器（不是播放器），没有可借鉴的播放器/源代码；上游
+  MarcoMovie 的 `docs/native-python-source-profile.md` 当时抓取返回
+  HTTP 503 未读到，Python 加载部分沿用 2026-11-27 的调研结论。
+  **许可证**：两个项目都是 GPL-3.0。v2.1 只借鉴设计与做法（标准库分
+  阶段打包、Node 控制协议、设置分区思路），YiPlayer 的代码是原创实现，
+  没有整段复制它们的代码；如果之后往 YiPlayer 里抄了它们的代码，
+  对外分发 IPA 时要按 GPL 提供对应源码并保留署名。
+
+- **v2.1 仍未验证（等 Actions 构建 + 真机测试）**：`vendor/python-stdlib`
+  文件夹引用是否原样打进包（`spiders/` 文件夹引用在 v2 已验证可行，
+  同一机制）；包内 `.so` 在真机上是否加载成功（若失败，改走 Yingxia
+  的 `.fwork` 框架化路线）；9280 bundle 的 `/config` / `/play` 返回
+  形状仍是按 CatPawOpen 惯例推断；py 冷启动时间与包体；ATS 对
+  `http://www.y456y.com` 在 v2.1 是否真的放行（v2.0.0 测试时用户未再
+  报 ATS 错误，但也没有明确确认放行）；LiveContainer 下应用内文件
+  浏览是否好用。
 
 ## v2 改了什么（相对 v1）
 
@@ -110,18 +205,18 @@ v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
 
 ## 未验证（必须在 Mac / 真机 / Actions 上验证）
 
-- **整个 v2 Xcode 构建**：`xcodegen generate` + `xcodebuild archive`
-  从未跑过。风险点按顺序：① `vendor/` 两个 xcframework 是否
-  下载成功并被 XcodeGen 认出来；② `NodeBridge.mm` 的
-  `<node/node.h>` 头文件布局（project.yml 里写了两个切片的
-  Headers 路径，未验证）；③ `ApplePython.c` 的 `<Python/Python.h>`
-  是否随嵌入的 xcframework 自动找到；④ `.mm` / `.c` 文件是否
-  被 XcodeGen 正确编进 target；⑤ `spiders/` 文件夹引用是否
-  把 `base/` 层级原样打进包里；⑥ `host.mjs` / `worker.mjs`
-  是否进了 bundle 的 Resources。
-- **BeeWare stdlib 路径**：`ApplePython.c` 假设 stdlib 在
-  `<Python.framework>/lib/python3.13`。如果 BeeWare 的包换了布局，
-  首次 CI 日志会打印它试过的路径，按日志改后缀，不要猜。
+- **v2.1 Xcode 构建（待跑）**：v2 的构建已在 Actions run #22 成功
+  （见“v2 构建实录”），v2.1 的构建还没有跑。v2.1 新增的风险点按顺序：
+  ① `vendor/python-stdlib/` 文件夹引用是否原样打进包（与 v2 已验证的
+  `spiders/` 文件夹引用同一机制）；② `ApplePython.c` 的新 6 参签名
+  与 `YiPythonLastError()` 是否与 Swift 侧一致；③ `Scripts/fetch-python.sh`
+  重写后的分阶段步骤在 CI 上是否跑通（缓存键含该脚本，改动即失效缓存）；
+  ④ 其余 v2 已验证的风险点（xcframework 下载、NodeBridge.mm、
+  `.mm` / `.c` 编进 target、host.mjs / worker.mjs 进 Resources）不再重复。
+- **BeeWare stdlib 路径（v2.1 已解决，见上）**：v2.0.0 的假设
+  `<Python.framework>/lib/python3.13` 是错的，实测 BeeWare 3.13-b18
+  的包里根本没有这条路径。v2.1 改走包内 `python-stdlib/python3.13`，
+  初始化前校验 `os.py` 是否存在，失败时报错里写明试过的路径。
 - **9280 bundle 的 `/config` 和 `/play` 返回形状**：`CatSource`
   按 CatPawOpen 惯例解析（`/config` 的 sites/list/sources/data，
   `/play` 的 `{url}` / `{playUrl}` / 裸 URL）。如果 v2 装上后
