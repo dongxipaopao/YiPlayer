@@ -2,9 +2,11 @@ import SwiftUI
 
 // MARK: - YiPlayerApp
 // Entry point. Dark-first, Noctra/Rex-inspired shell.
-// The app ships NO video library: everything comes from subscriptions
-// the user imports (Settings -> Subscription). First launch shows an
-// empty home with one clear action: "导入订阅源".
+// The app ships NO video library: everything comes from the sources
+// it seeds on first launch (懂片帝 py + 9280 猫源) and the subscriptions
+// the user imports (Settings -> Subscription). The embedded runtimes
+// (CPython, Node.js) start LAZILY on first use, never at launch —
+// a cold start must not wait for either of them.
 @main
 struct YiPlayerApp: App {
     @StateObject private var subscriptions = SubscriptionStore()
