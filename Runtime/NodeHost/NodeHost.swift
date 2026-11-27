@@ -78,23 +78,46 @@ public final class NodeHost {
     private var controlFileURL: URL { Self.supportDirURL.appendingPathComponent("control.json") }
     private var relistenFileURL: URL { Self.supportDirURL.appendingPathComponent("relisten") }
 
+    /// v2.1.1: like tvbox-silicon's EmbeddedNodeHost.available, both
+    /// the entry scripts AND the framework binary must exist. v2.1
+    /// only checked the .mjs files, so a build with the scripts but
+    /// no NodeMobile.framework would pass this check and fail later
+    /// with a vaguer error.
     public var isAvailable: Bool {
         guard let dir = Self.nodeHostDirURL else { return false }
-        return FileManager.default.fileExists(atPath: dir.appendingPathComponent("host.mjs").path)
-            && FileManager.default.fileExists(atPath: dir.appendingPathComponent("worker.mjs").path)
+        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("host.mjs").path),
+              FileManager.default.fileExists(atPath: dir.appendingPathComponent("worker.mjs").path) else {
+            return false
+        }
+        guard let binary = Bundle.main.url(forResource: "NodeMobile", withExtension: "framework",
+                                           subdirectory: "Frameworks")?
+            .appendingPathComponent("NodeMobile") else { return false }
+        return FileManager.default.fileExists(atPath: binary.path)
     }
 
     // MARK: Start (once)
     public func ensureStarted() async throws {
-        if control != nil { return }
+        // v2.1.1: the check-and-set of startTask must be atomic.
+        // Before, two concurrent cat calls could both see
+        // startTask == nil and start Node twice; node_start can only
+        // run once per process, so the second start would fail.
+        // Yingxia avoids this by being an actor; this class uses the
+        // lock for the same check-and-set.
+        lock.lock()
+        if control != nil {
+            lock.unlock()
+            return
+        }
         if let task = startTask {
+            lock.unlock()
             try await task.value
             return
         }
         let task = Task<Void, Error> {
             try await self.start()
         }
-        lock.lock(); startTask = task; lock.unlock()
+        startTask = task
+        lock.unlock()
         defer { lock.lock(); startTask = nil; lock.unlock() }
         try await task.value
     }
