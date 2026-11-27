@@ -149,7 +149,21 @@ static int initializeInner(const char *frameworkPath,
     // not own signals), UTF-8 filesystem encoding.
     config.write_bytecode = 0;
     config.install_signal_handlers = 0;
-    config.utf8_mode = 1;
+    // utf8_mode lives on PyPreConfig, NOT PyConfig (3.13): setting it
+    // on PyConfig does not compile. Pre-initialize with an isolated
+    // preconfig instead. This runs once (the once-guard above), which
+    // is required — Py_PreInitialize must not be called twice.
+    {
+        PyPreConfig preconfig;
+        PyPreConfig_InitIsolatedPreConfig(&preconfig);
+        preconfig.utf8_mode = 1;
+        PyStatus pre = Py_PreInitialize(&preconfig);
+        if (PyStatus_Exception(pre)) {
+            setLastError("Py_PreInitialize failed: %s",
+                         pre.err_msg ? pre.err_msg : "(no message)");
+            return 2;
+        }
+    }
     // The app executable, so CPython's path computation has a real
     // anchor (tvbox-silicon sets this too). stdlib_dir above stays
     // the authority for where the stdlib lives.
