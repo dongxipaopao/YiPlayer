@@ -1,21 +1,22 @@
-// NodeBridge.mm — Objective-C++ wrapper around node::Start.
+// NodeBridge.mm — Objective-C++ wrapper around node_start().
 //
 // This is the embedding entry point nodejs-mobile is built for: the
-// framework's node::Start runs a full Node.js on a thread of the app's
-// own, with V8 in JIT-less mode (the only mode iOS allows). The React
-// Native / Cordova plugins for nodejs-mobile start Node exactly this
-// way; YiPlayer does the same, then drives it over loopback HTTP.
+// framework's node_start() runs a full Node.js on a thread of the
+// app's own, with V8 in JIT-less mode (the only mode iOS allows).
+// The React Native / Cordova plugins for nodejs-mobile start Node
+// exactly this way; YiPlayer does the same, then drives it over
+// loopback HTTP.
 //
-// Build note (verify on the first CI run): this file includes
-// <node/node.h> from the NodeMobile.xcframework. project.yml sets
-// HEADER_SEARCH_PATHS to the framework's Headers directory for both
-// the device slice (ios-arm64) and the simulator slice
-// (ios-arm64-simulator). If the xcframework lays its headers out
-// differently, the first CI log will name the missing header — fix
-// the search path there, do not change this file's include.
+// Verified 2026-11-27 against the real
+// nodejs-mobile-v26.13.0-apple.zip: the xcframework ships ONLY
+// NodeMobile.h, which declares `int node_start(int argc, char
+// *argv[])`. There is NO node/node.h anywhere in the archive, so
+// do NOT include <node/node.h> or node::Start here — that was the
+// run #19 build failure. <NodeMobile/NodeMobile.h> resolves through
+// FRAMEWORK_SEARCH_PATHS ($(PROJECT_DIR)/vendor).
 #import "NodeBridge.h"
 
-#include <node/node.h>
+#import <NodeMobile/NodeMobile.h>
 
 #include <pthread.h>
 #include <string>
@@ -43,9 +44,9 @@ void *runNode(void *raw) {
     };
     const int argc = 4;
     // Blocks until Node exits (normally: when the app exits).
-    // node::Start returns the process exit code; on iOS there is no
+    // node_start returns the process exit code; on iOS there is no
     // parent to report it to, so the value is dropped.
-    node::Start(argc, const_cast<char **>(argv));
+    node_start(argc, const_cast<char **>(argv));
     return nullptr;
 }
 
