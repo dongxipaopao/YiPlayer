@@ -97,8 +97,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: YiPlayer
-        CFBundleShortVersionString: "2.1.0"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "2.1.1"
+        CFBundleVersion: "4"
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
