@@ -54,13 +54,32 @@ struct HomeView: View {
     }
 
     private func loadHome() async {
-        guard let source = subscriptions.allSources.first else { return }
+        // v2: try EVERY source in order, first non-empty home wins.
+        // v1 only tried the first source and showed its error — if the
+        // first source was the (then broken) 9280 cat source, home was
+        // an error even though 懂片帝 would have worked. A cancelled
+        // task (view scrolled away / refresh interrupted) is not an
+        // error and must not paint a red "cancelled" on the home page.
         isLoading = true
         defer { isLoading = false }
-        do {
-            items = try await runner(for: source).home(filter: [:])
-        } catch {
-            errorMessage = error.localizedDescription
+        var lastError: Error?
+        for source in subscriptions.allSources {
+            do {
+                let homeItems = try await runner(for: source).home(filter: [:])
+                if !homeItems.isEmpty {
+                    items = homeItems
+                    errorMessage = nil
+                    return
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                lastError = error
+                continue
+            }
+        }
+        if items.isEmpty, let lastError {
+            errorMessage = lastError.localizedDescription
         }
     }
 }
@@ -163,8 +182,9 @@ struct EmptyStateView: View {
     }
 }
 
-/// Pick the right runner for a source kind. Py sources go through the
-/// stub host in v1 (see PySource.swift) — the call site never changes.
+/// Pick the right runner for a source kind. v2: py runs through the
+/// embedded CPython host, cat through JavaScriptCore or the embedded
+/// Node.js server host — the call site never changes.
 func runner(for source: Source) -> any SourceRunner {
     switch source.kind {
     case .cat: return CatSource(source: source)
