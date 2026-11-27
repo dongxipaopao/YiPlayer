@@ -4,20 +4,24 @@ import UniformTypeIdentifiers
 
 // MARK: - SettingsView + SubscriptionView
 // Subscription import, multi-subscription list, failure keeps the last
-// good config (see SubscriptionStore), and the honest v2 capability list.
+// good config (see SubscriptionStore), and the honest v2.1 capability list.
 //
-// Import routes (v2 — the user runs YiPlayer inside LiveContainer, so
-// no route may depend on the file picker alone):
-//   1. URL paste (TVBox JSON / cat .js / .js.md5 / .py spider URL)
-//   2. Paste subscription TEXT (multi-line box + paste-from-clipboard):
+// Import routes (v2.1 — the user runs YiPlayer inside LiveContainer, so
+// no route may depend on the system file picker alone):
+//   1. URL: address field + one big, full-width "导入订阅" button.
+//   2. In-app file browser (PRIMARY local-file route): lists the files
+//      already in the app's Documents / imports / spiders, tap to
+//      import. The user drops files there with the system Files app.
+//      The system picker stays only as a secondary button — under
+//      LiveContainer its rows often cannot be tapped at all.
+//   3. Paste subscription TEXT (multi-line box + paste-from-clipboard):
 //      TVBox JSON text, a .py spider, or a .js bundle pasted in.
-//      This is the fallback when the file picker cannot reach a file.
-//   3. Local file (.json / .js / .py / .txt): the picked file is
-//      COPIED into the app's own Documents/imports/ first (under
+//   4. System file picker (.json / .js / .py / .txt): the picked file
+//      is COPIED into the app's own Documents/imports/ first (under
 //      security-scoped access), then read from the copy — reading the
 //      security-scoped URL directly is unreliable under LiveContainer's
 //      sandbox, and a copied file keeps working after the picker closes.
-//   4. Every failure shows a concrete reason on screen, never a bare
+//   5. Every failure shows a concrete reason on screen, never a bare
 //      "cancelled": a cancelled picker says so plainly, anything else
 //      names the step that failed and points at the paste route.
 struct SettingsView: View {
@@ -27,55 +31,22 @@ struct SettingsView: View {
     @State private var pasteText = ""
     @State private var isImporting = false
     @State private var importMessage: String?
+    @State private var importMessageIsError = false
     @State private var showFilePicker = false
     @State private var showClearHistoryConfirm = false
     /// Discovered cat sites per source id (from the bundle's /config).
     @State private var catSites: [String: [(key: String, name: String)]] = [:]
     @State private var loadingSitesFor: String?
+    /// Files found in the app's Documents (in-app file browser).
+    @State private var localFiles: [LocalImportFile] = []
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("订阅源") {
-                    TextField("订阅地址（TVBox JSON / 猫源 .js / .js.md5 / py .py）", text: $urlText)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    HStack {
-                        Button("导入") { Task { await importFromURL() } }
-                            .disabled(isImporting || urlText.isEmpty)
-                        Button("本地文件") { showFilePicker = true }
-                    }
-                    if let importMessage {
-                        Text(importMessage).font(.footnote).foregroundStyle(.secondary)
-                    }
-                    ForEach(subscriptions.subscriptions) { sub in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(sub.name).font(.headline)
-                            Text("\(sub.sources.count) 个源 · \(sub.kind.rawValue)")
-                                .font(.caption).foregroundStyle(.secondary)
-                            if let error = sub.lastError {
-                                Text("上次刷新失败（已保留上次可用配置）：\(error)")
-                                    .font(.caption).foregroundStyle(.red)
-                            }
-                        }
-                        .swipeActions {
-                            Button("删除", role: .destructive) { subscriptions.remove(id: sub.id) }
-                        }
-                    }
-                }
-                Section("粘贴导入（文件选不了时用这个）") {
-                    Text("把订阅 JSON、.py 蜘蛛或 .js 猫源全文粘贴进来，不走文件选择器。")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    TextEditor(text: $pasteText)
-                        .frame(minHeight: 120)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    HStack {
-                        Button("从剪贴板粘贴") { pasteFromClipboard() }
-                        Button("导入粘贴的文本") { Task { await importFromPaste() } }
-                            .disabled(isImporting || pasteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }
+                subscriptionSection
+                subscribedList
+                localFileSection
+                pasteSection
                 catSiteSection
                 Section("播放") {
                     Text("播放器：AVPlayer（系统）\nHDR / 4K / 杜比视界原样透传，不转码、不调色。")
@@ -89,8 +60,8 @@ struct SettingsView: View {
                             Button("清除", role: .destructive) { history.clear() }
                         }
                 }
-                Section("关于 v2") {
-                    Text("YiPlayer 2.0.0\n• 支持：TVBox JSON type 1/4、py 源（内嵌 CPython）、猫源（JavaScriptCore 有界宿主 + 内嵌 Node.js 服务端 bundle）\n• 首次打开已预置懂片帝和 9280 猫源，不用先导入\n• 不含内置片库、云盘、音乐、漫画、小说")
+                Section("关于 v2.1") {
+                    Text("YiPlayer 2.1.0\n• 支持：TVBox JSON type 1/4、py 源（内嵌 CPython）、猫源（JavaScriptCore 有界宿主 + 内嵌 Node.js 服务端 bundle）\n• 首次打开已预置懂片帝和 9280 猫源，不用先导入\n• 不含内置片库、云盘、音乐、漫画、小说")
                         .font(.subheadline)
                     Text("py 源：内嵌 CPython 3.13 运行 pd.py（懂片帝）。首次调用会慢一些（解释器冷启动），之后正常。")
                         .font(.subheadline).foregroundStyle(.secondary)
@@ -103,6 +74,123 @@ struct SettingsView: View {
                           allowedContentTypes: [.json, UTType(filenameExtension: "js") ?? .sourceCode, .pythonScript, .plainText, .data],
                           allowsMultipleSelection: false) { result in
                 importFromFile(result: result)
+            }
+            .task { refreshLocalFiles() }
+        }
+    }
+
+    // MARK: - Subscription URL import
+    private var subscriptionSection: some View {
+        Section {
+            Text("订阅地址")
+                .font(.caption).foregroundStyle(.secondary)
+            TextField("https://…（TVBox JSON / 猫源 .js / .js.md5 / py .py）", text: $urlText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+            Button {
+                Task { await importFromURL() }
+            } label: {
+                if isImporting {
+                    ProgressView().tint(.white)
+                } else {
+                    Text("导入订阅").bold()
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .frame(maxWidth: .infinity)
+            .disabled(isImporting || urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if let importMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: importMessageIsError ? "xmark.circle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(importMessageIsError ? .red : .green)
+                    Text(importMessage)
+                        .font(.footnote)
+                        .foregroundStyle(importMessageIsError ? .red : .secondary)
+                }
+            }
+        } header: {
+            Text("添加订阅")
+        } footer: {
+            Text("粘贴订阅地址，点“导入订阅”。也可以用下面的本地文件或粘贴导入。")
+        }
+    }
+
+    private var subscribedList: some View {
+        Section("已导入的订阅") {
+            if subscriptions.subscriptions.isEmpty {
+                Text("还没有导入订阅。首次打开已预置懂片帝和 9280 猫源。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            ForEach(subscriptions.subscriptions) { sub in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(sub.name).font(.headline)
+                    Text("\(sub.sources.count) 个源 · \(sub.kind.rawValue)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let error = sub.lastError {
+                        Text("上次刷新失败（已保留上次可用配置）：\(error)")
+                            .font(.caption).foregroundStyle(.red)
+                    }
+                }
+                .swipeActions {
+                    Button("删除", role: .destructive) { subscriptions.remove(id: sub.id) }
+                }
+            }
+        }
+    }
+
+    // MARK: - In-app file browser (primary local-file route)
+    private var localFileSection: some View {
+        Section {
+            if localFiles.isEmpty {
+                Text("这里还没有文件。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                ForEach(localFiles) { file in
+                    Button {
+                        Task { await importLocalFile(file) }
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(file.name).font(.subheadline)
+                                Text("\(file.folder) · \(Self.formattedSize(file.size)) · \(file.modified.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .swipeActions {
+                        Button("删除", role: .destructive) { deleteLocalFile(file) }
+                    }
+                }
+            }
+            HStack {
+                Button("刷新列表") { refreshLocalFiles() }
+                Spacer()
+                Button("系统文件选择器") { showFilePicker = true }
+            }
+            .font(.subheadline)
+        } header: {
+            Text("从本地文件导入")
+        } footer: {
+            Text("把 .json / .js / .py / .txt 文件放进系统“文件”App → YiPlayer 的 Documents 文件夹（或里面的 imports / spiders 子文件夹），就会出现在这里，点一下就导入。LiveContainer 下系统文件选择器选不中文件时，用这里。")
+        }
+    }
+
+    private var pasteSection: some View {
+        Section("粘贴导入（文件选不了时用这个）") {
+            Text("把订阅 JSON、.py 蜘蛛或 .js 猫源全文粘贴进来，不走文件选择器。")
+                .font(.footnote).foregroundStyle(.secondary)
+            TextEditor(text: $pasteText)
+                .frame(minHeight: 120)
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+            HStack {
+                Button("从剪贴板粘贴") { pasteFromClipboard() }
+                Button("导入粘贴的文本") { Task { await importFromPaste() } }
+                    .disabled(isImporting || pasteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
     }
@@ -158,17 +246,22 @@ struct SettingsView: View {
             try await runner.loadBundle()
             catSites[source.id] = runner.sites
             if runner.sites.isEmpty {
-                importMessage = "「\(source.name)」没有返回站点列表，将用默认站点 douban。"
+                setImportMessage("「\(source.name)」没有返回站点列表，将用默认站点 douban。", isError: false)
             }
         } catch {
-            importMessage = "加载「\(source.name)」站点列表失败：\(error.localizedDescription)"
+            setImportMessage("加载「\(source.name)」站点列表失败：\(displayableErrorMessage(error) ?? "已取消")", isError: true)
         }
+    }
+
+    private func setImportMessage(_ text: String, isError: Bool) {
+        importMessage = text
+        importMessageIsError = isError
     }
 
     // MARK: - URL import
     private func importFromURL() async {
         guard let url = URL(string: urlText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            importMessage = "地址无效"
+            setImportMessage("地址无效", isError: true)
             return
         }
         isImporting = true
@@ -177,9 +270,10 @@ struct SettingsView: View {
             let (text, finalURL) = try await SubscriptionImporter.fetch(url: url)
             let sub = try parseSubscription(text: text, url: finalURL)
             subscriptions.add(sub)
-            importMessage = "已导入「\(sub.name)」：\(sub.sources.count) 个源"
+            setImportMessage("已导入「\(sub.name)」：\(sub.sources.count) 个源", isError: false)
         } catch {
-            importMessage = "导入失败：\(error.localizedDescription)（已保留上次可用配置）"
+            if isCancellation(error) { return }
+            setImportMessage("导入失败：\(displayableErrorMessage(error) ?? "已取消")（已保留上次可用配置）", isError: true)
         }
     }
 
@@ -187,9 +281,9 @@ struct SettingsView: View {
     private func pasteFromClipboard() {
         if let text = UIPasteboard.general.string, !text.isEmpty {
             pasteText = text
-            importMessage = "已从剪贴板粘贴 \(text.count) 字，点“导入粘贴的文本”。"
+            setImportMessage("已从剪贴板粘贴 \(text.count) 字，点“导入粘贴的文本”。", isError: false)
         } else {
-            importMessage = "剪贴板里没有文本。先去别处复制订阅内容，再回来点这个按钮。"
+            setImportMessage("剪贴板里没有文本。先去别处复制订阅内容，再回来点这个按钮。", isError: true)
         }
     }
 
@@ -201,10 +295,11 @@ struct SettingsView: View {
         do {
             let sub = try parsePasted(text: text)
             subscriptions.add(sub)
-            importMessage = "已导入「\(sub.name)」：\(sub.sources.count) 个源"
+            setImportMessage("已导入「\(sub.name)」：\(sub.sources.count) 个源", isError: false)
             pasteText = ""
         } catch {
-            importMessage = "粘贴导入失败：\(error.localizedDescription)"
+            if isCancellation(error) { return }
+            setImportMessage("粘贴导入失败：\(displayableErrorMessage(error) ?? "已取消")", isError: true)
         }
     }
 
@@ -236,21 +331,74 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Local file import (copy into Documents first)
+    // MARK: - In-app file browser
+    struct LocalImportFile: Identifiable {
+        let id = UUID()
+        let url: URL
+        let name: String
+        let folder: String // Documents / imports / spiders
+        let size: Int
+        let modified: Date
+    }
+
+    private static let importableExtensions: Set<String> = ["json", "js", "py", "txt", "md5"]
+
+    private func refreshLocalFiles() {
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dirs: [(URL, String)] = [
+            (docs, "Documents"),
+            (docs.appendingPathComponent("imports", isDirectory: true), "imports"),
+            (docs.appendingPathComponent("spiders", isDirectory: true), "spiders"),
+        ]
+        var found: [LocalImportFile] = []
+        for (dir, label) in dirs {
+            guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+            for name in names {
+                let url = dir.appendingPathComponent(name)
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+                guard Self.importableExtensions.contains(url.pathExtension.lowercased()) else { continue }
+                let attrs = try? fm.attributesOfItem(atPath: url.path)
+                found.append(LocalImportFile(
+                    url: url, name: name, folder: label,
+                    size: (attrs?[.size] as? Int) ?? 0,
+                    modified: (attrs?[.modificationDate] as? Date) ?? Date.distantPast))
+            }
+        }
+        localFiles = found.sorted { $0.modified > $1.modified }
+    }
+
+    private static func formattedSize(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    private func deleteLocalFile(_ file: LocalImportFile) {
+        try? FileManager.default.removeItem(at: file.url)
+        refreshLocalFiles()
+    }
+
+    private func importLocalFile(_ file: LocalImportFile) async {
+        isImporting = true
+        defer { isImporting = false }
+        importParsedFile(at: file.url, fileName: file.name)
+    }
+
+    // MARK: - System file picker (secondary route)
     private func importFromFile(result: Result<[URL], Error>) {
         switch result {
         case .failure(let error):
             // A cancelled picker is not an error: say so plainly and
             // stop. Anything else names the failure and points at paste.
             if (error as NSError).code == NSUserCancelledError {
-                importMessage = "已取消，未导入任何文件。"
+                setImportMessage("已取消，未导入任何文件。", isError: false)
             } else {
-                importMessage = "文件导入失败：\(error.localizedDescription)。可以改用上方的粘贴导入，把文件内容粘贴进来。"
+                setImportMessage("文件导入失败：\(displayableErrorMessage(error) ?? "已取消")。可以改用上方的粘贴导入，把文件内容粘贴进来。", isError: true)
             }
             return
         case .success(let urls):
             guard let url = urls.first else {
-                importMessage = "没有选中文件。"
+                setImportMessage("没有选中文件。", isError: true)
                 return
             }
             importFile(url: url)
@@ -266,7 +414,7 @@ struct SettingsView: View {
     private func importFile(url: URL) {
         let fileName = url.lastPathComponent
         guard url.startAccessingSecurityScopedResource() else {
-            importMessage = "无法访问这个文件（容器沙盒限制，LiveContainer 下常见）。请改用上方的粘贴导入，把文件内容粘贴进来。"
+            setImportMessage("无法访问这个文件（容器沙盒限制，LiveContainer 下常见）。请改用上方的本地文件浏览或粘贴导入，把文件内容粘贴进来。", isError: true)
             return
         }
         defer { url.stopAccessingSecurityScopedResource() }
@@ -280,19 +428,26 @@ struct SettingsView: View {
             }
             try FileManager.default.copyItem(at: url, to: copy)
         } catch {
-            importMessage = "复制文件失败：\(error.localizedDescription)。请改用上方的粘贴导入。"
+            setImportMessage("复制文件失败：\(displayableErrorMessage(error) ?? "已取消")。请改用上方的粘贴导入。", isError: true)
             return
         }
-        guard let text = try? String(contentsOf: copy, encoding: .utf8) else {
-            importMessage = "文件「\(fileName)」不是 UTF-8 文本，无法导入。"
+        importParsedFile(at: copy, fileName: fileName)
+        refreshLocalFiles()
+    }
+
+    /// Read an already-local file (in-app browser, or a copy the picker
+    /// just made) and turn it into a subscription.
+    private func importParsedFile(at url: URL, fileName: String) {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            setImportMessage("文件「\(fileName)」不是 UTF-8 文本，无法导入。", isError: true)
             return
         }
         do {
-            let sub = try parseSubscription(text: text, url: copy, fileName: fileName)
+            let sub = try parseSubscription(text: text, url: url, fileName: fileName)
             subscriptions.add(sub)
-            importMessage = "已导入本地文件「\(fileName)」：\(sub.sources.count) 个源"
+            setImportMessage("已导入本地文件「\(fileName)」：\(sub.sources.count) 个源", isError: false)
         } catch {
-            importMessage = "导入失败：\(error.localizedDescription)（已保留上次可用配置）"
+            setImportMessage("导入失败：\(displayableErrorMessage(error) ?? "已取消")（已保留上次可用配置）", isError: true)
         }
     }
 
