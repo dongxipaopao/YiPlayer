@@ -52,7 +52,18 @@ else
   echo "Resolving latest non-prerelease 3.13 release of $REPO ..."
   RELEASE_JSON="$(mktemp)"
   trap 'rm -f "$RELEASE_JSON"' EXIT
-  curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=30" -o "$RELEASE_JSON"
+  # GitHub's unauthenticated API limit (60 req/hour per IP) is routinely
+  # exhausted on shared Actions runners -> 403. Actions provides a token
+  # (GITHUB_TOKEN) in every run; use it when present so the call is
+  # authenticated (5,000 req/hour). The token is never printed or stored.
+  # (Plain if/else, not an empty array: /bin/sh here is bash 3.2, where an
+  # empty "${ARR[@]}" under set -u is an unbound-variable error.)
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+      "https://api.github.com/repos/$REPO/releases?per_page=30" -o "$RELEASE_JSON"
+  else
+    curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=30" -o "$RELEASE_JSON"
+  fi
 
   ASSET_URL="$(RELEASE_JSON="$RELEASE_JSON" python3 -c '
 import json, os
