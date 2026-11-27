@@ -22,6 +22,15 @@ Xcode；只验证了 YAML 语法、Swift 文件的括号平衡与 API 名称、
   HLS 代理端口只在 listener `.ready` 后读取；文件导入加了
   security-scoped 访问；Info.plist 的 `armv7` 改 `arm64`、
   加了 `UILaunchScreen` 和 iPad 方向。
+- 第 1 次 Actions 构建失败（2026-11-27 18:02，exit 65，3 个编译错，
+  均已修）：`NWListener(..., on: .loopback)` 不是合法写法，改成
+  `on: .any`（OS 分配临时端口，`.ready` 后读取）；`HomeView` 的
+  `.background(.accent, ...)` 改成 `Color.accentColor`；
+  `AVPlayerItem` 没有 `eligibleForHDRPlayback` 这个成员，v1 不再
+  预检 HDR（播放仍原样透传，播不了时靠 CoreMedia -17223 报错，
+  HDR 徽标在 v1 不显示）。另把播放器里 MainActor 隔离属性在
+  Sendable 闭包里的修改包进 `Task { @MainActor ... }`，免得升
+  Swift 6 后变报错。
 - 所用 API 均为真实 API：SwiftUI（`TabView`、`NavigationStack`、
   `AsyncImage`、`VideoPlayer`）、AVKit（`AVPlayer`、`AVPlayerItem`、
   `eligibleForHDRPlayback`）、AVFoundation、JavaScriptCore
