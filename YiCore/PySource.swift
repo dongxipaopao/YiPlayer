@@ -105,6 +105,15 @@ public final class EmbeddedPythonHost: PySourceHost {
                         subdirectory: "Frameworks")
     }
 
+    /// v2.1: the CPython stdlib, staged into the bundle by
+    /// Scripts/fetch-python.sh (project.yml folder reference).
+    /// v2.0.0 looked for it under <Python.framework>/lib/python3.13,
+    /// which does not exist anywhere in the BeeWare package — that is
+    /// why every first py call failed with error code 4.
+    private static var pythonStdlibDirURL: URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("python-stdlib/python3.13")
+    }
+
     private static var spidersDirURL: URL? {
         Bundle.main.resourceURL?.appendingPathComponent("spiders")
     }
@@ -120,19 +129,35 @@ public final class EmbeddedPythonHost: PySourceHost {
     private func ensureInitialized() throws {
         if initialized { return }
         guard let framework = Self.pythonFrameworkURL,
-              let spiders = Self.spidersDirURL else {
+              let spiders = Self.spidersDirURL,
+              let stdlib = Self.pythonStdlibDirURL else {
             // The framework is absent from this build: keep the honest
             // v1 message instead of crashing or pretending.
             throw SourceError.notSupported(Self.unavailableMessage)
         }
+        // The stdlib is a bundle resource: prove it is really there
+        // before starting the interpreter, and name the exact path
+        // when it is not (v2.0.0 only ever said "错误码 4").
+        let osPy = stdlib.appendingPathComponent("os.py")
+        guard FileManager.default.fileExists(atPath: osPy.path) else {
+            throw SourceError.notSupported(
+                "Python 标准库未包含在此构建中（未找到 \(osPy.path)），请重新构建")
+        }
         let sitePackages = spiders.appendingPathComponent("site-packages")
+        let dynload = stdlib.appendingPathComponent("lib-dynload")
         let rc = YiPythonInitialize(
             framework.path,
+            stdlib.path,
+            dynload.path,
             spiders.path,
             sitePackages.path,
             Self.documentsSpidersDirURL.path)
         guard rc == 0, YiPythonIsReady() != 0 else {
-            throw SourceError.parse("Python 运行时初始化失败（错误码 \(rc)）")
+            // v2.1: the C bridge records WHY init failed (PyStatus
+            // message + paths tried) — surface it, not just the code.
+            let detail = YiPythonLastError().map(String.init(cString:))
+                .flatMap { $0.isEmpty ? nil : $0 } ?? "未知原因"
+            throw SourceError.parse("Python 运行时初始化失败（错误码 \(rc)）：\(detail)")
         }
         initialized = true
     }
