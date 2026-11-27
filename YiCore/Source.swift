@@ -83,3 +83,34 @@ public enum SourceError: LocalizedError {
         }
     }
 }
+
+// MARK: - Cancellation is not an error (v2.1)
+//
+// A view that went away mid-load, a search superseded by a newer
+// query, a pull-to-refresh interrupted — none of these is a failure,
+// and none of them may paint red text on the screen. v2.0.0 only
+// caught CancellationError, but a cancelled URLSession task throws
+// URLError with code .cancelled (localizedDescription is the bare
+// English word "cancelled"), which fell into lastError and showed up
+// as a red "cancelled" on an otherwise empty home page. Every view
+// that shows an error must go through these two helpers.
+public func isCancellation(_ error: Error) -> Bool {
+    if error is CancellationError { return true }
+    if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+    if (error as NSError).code == NSUserCancelledError { return true }
+    // A wrapped cancellation (e.g. an error whose message IS the
+    // cancellation) is still a cancellation, not content.
+    let text = error.localizedDescription.lowercased()
+    return text == "cancelled" || text == "canceled"
+}
+
+/// The text a view may show for `error`, or nil when the error is a
+/// cancellation (or is nothing but the word "cancelled").
+public func displayableErrorMessage(_ error: Error) -> String? {
+    if isCancellation(error) { return nil }
+    let text = error.localizedDescription
+    if text.lowercased().contains("cancelled") || text.lowercased().contains("canceled") {
+        return nil
+    }
+    return text
+}
