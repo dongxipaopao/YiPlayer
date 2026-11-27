@@ -117,13 +117,12 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
-        # NodeMobile headers: <node/node.h> lives in the xcframework
-        # slice's Headers dir. Both slices are listed (headers are
-        # arch-independent); UNVERIFIED — first CI log decides whether
-        # the layout is Headers/node/node.h or something else.
-        HEADER_SEARCH_PATHS:
-          - "$(PROJECT_DIR)/vendor/NodeMobile.xcframework/ios-arm64/NodeMobile.framework/Headers"
-          - "$(PROJECT_DIR)/vendor/NodeMobile.xcframework/ios-arm64-simulator/NodeMobile.framework/Headers"
+        # NodeMobile headers: verified 2026-11-27 against the real
+        # nodejs-mobile-v26.13.0-apple.zip — the xcframework ships
+        # ONLY NodeMobile.h (declaring node_start); there is no
+        # node/node.h anywhere, so NodeBridge.mm imports
+        # <NodeMobile/NodeMobile.h> through FRAMEWORK_SEARCH_PATHS
+        # and needs no HEADER_SEARCH_PATHS entries.
 schemes:
   YiPlayer-iOS:
     build:
