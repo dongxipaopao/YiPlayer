@@ -243,3 +243,32 @@ v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
 推送，工作流的 "Restore icon assets" 步骤在 `xcodegen generate`
 之前解出来。换图标时重新打包分片即可；`.github/workflows/build-ios.yml`
 仍需走网页上传（接口对 workflow 文件返回 403，v1 已验证）。
+
+## v2 构建实录（2026-11-27，Actions 上已验证）
+
+- #17（run 46005851164）Build 失败 exit 65，两个 Swift 错误：
+  NodeHost.swift 里 `guard let control` 在 catch 块重复绑定（前面
+  的 guard 已解包，`control` 不再是 Optional）→ 改成
+  `guard let fresh = self.control`；SettingsView.swift 的
+  `UTType.javascript` 不存在 → 改成
+  `UTType(filenameExtension: "js") ?? .sourceCode`。
+- #19（run 46007783251）Build 失败：`fatal error: 'node/node.h'
+  file not found`。实测下载 nodejs-mobile-v26.13.0-apple.zip
+  验证：xcframework 里只有 `NodeMobile.h`（声明
+  `int node_start(int argc, char *argv[])`），根本没有 node/
+  头文件。NodeBridge.mm 改用 `node_start`，不再 include
+  `<node/node.h>`、不再调用 `node::Start`；project.yml 删掉
+  HEADER_SEARCH_PATHS（框架头经 FRAMEWORK_SEARCH_PATHS 解析）。
+- #22（run 46008258962）成功：YiPlayer-unsigned-ipa 23,082,294
+  字节，IPA 23,416,561 字节，sha256
+  `91be87c4…553fda0`，v2.0.0 build 2。IPA 内已验证含有
+  Frameworks/NodeMobile.framework（66.5 MB）、
+  Frameworks/Python.framework、host.mjs、worker.mjs、
+  spiders/pd.py + _yi_bridge.py + requests。
+- 仍未验证（等真机测试）：9280 bundle 在无 JIT Node 26 下
+  能否启动 Fastify 并返回 /config / /play；pd.py 首次冷启动
+  时间和包体；ATS 对 http://www.y456y.com 是否真的放行；
+  LiveContainer 文件导入修复；图标显示。
+- 补充：用户后来给了 classic PAT（custom.github-pat），接口
+  403 的限制解除——workflow 文件、日志下载、二进制上传都
+  可以直接走 API，不用再经网页上传。
