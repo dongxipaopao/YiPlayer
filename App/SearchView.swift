@@ -49,6 +49,9 @@ struct SearchView: View {
         for source in subscriptions.allSources where source.isSearchable {
             do {
                 merged.append(contentsOf: try await runner(for: source).search(keyword: keyword, page: 1))
+            } catch is CancellationError {
+                // Search superseded by a newer query: not an error.
+                return
             } catch {
                 errors.append("\(source.name)：\(error.localizedDescription)")
             }
