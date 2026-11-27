@@ -49,7 +49,13 @@ extern "C" {
 ///   documentsSpidersDir— Documents/spiders (user-imported .py files)
 /// Returns 0 on success, non-zero with a message recorded for
 /// YiPythonLastError (and printed to stderr). Safe to call
-/// repeatedly: later calls are no-ops.
+/// repeatedly: the first attempt's result is cached and later calls
+/// return it without touching CPython again. This matters: a failed
+/// Py_InitializeFromConfig leaves the runtime half-initialised
+/// (CPython 3.13 pyinit_core_reconfigure), and re-entering it from
+/// another thread fails with "failed to read thread state" — v2.1.0
+/// retried on every call and only ever showed that misleading
+/// second error. See ApplePython.c.
 int YiPythonInitialize(const char *frameworkPath,
                        const char *stdlibDir,
                        const char *dynloadDir,
