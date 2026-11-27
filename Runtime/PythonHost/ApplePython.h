@@ -56,6 +56,11 @@ extern "C" {
 /// another thread fails with "failed to read thread state" — v2.1.0
 /// retried on every call and only ever showed that misleading
 /// second error. See ApplePython.c.
+/// v2.1.2: the search paths are applied to sys.path AFTER init
+/// succeeds (PyConfig.module_search_paths is recomputed away during
+/// init — see ApplePython.c); an _yi_bridge import failure records
+/// the real Python exception (type, message, traceback) plus the
+/// sys.path at import time in YiPythonLastError.
 int YiPythonInitialize(const char *frameworkPath,
                        const char *stdlibDir,
                        const char *dynloadDir,
@@ -64,7 +69,9 @@ int YiPythonInitialize(const char *frameworkPath,
                        const char *documentsSpidersDir);
 
 /// The last initialisation failure, as a human-readable string
-/// (includes the PyStatus message and the paths that were tried).
+/// (includes the PyStatus message and the paths that were tried; for
+/// an _yi_bridge import failure, the real Python exception — type,
+/// message, traceback — and the sys.path at import time, v2.1.2).
 /// Empty string when there was no failure. The pointer stays valid
 /// for the life of the process; copy it if you need it longer.
 const char *YiPythonLastError(void);
