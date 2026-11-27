@@ -111,6 +111,22 @@ v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
   每轮自带）时用 `Authorization: Bearer` 调 API；写成 if/else 而
   不是空数组（该脚本跑在 bash 3.2 下，`set -u` 时空数组展开会
   报错）。已推送，待下一次构建验证。
+- **run #37（run 46012889503，push，head 7c4e7c7）成功**：
+  YiPlayer-unsigned-ipa 30,854,790 字节（artifact），IPA
+  31,357,817 字节，sha256
+  `f1e76c8ddd6a27080bcbd5cca6923127efebbde38b351bb16f5a1d32d96a5228`，
+  v2.1.0 build 3，iPhone+iPad。IPA 内已验证：`python-stdlib/
+  python3.13/os.py` 与 `lib-dynload/_socket.cpython-313-iphoneos.so`
+  都在包内（根因 A 已修）；`host.mjs`/`worker.mjs` 在包根目录
+  （根因 B 已修）；Frameworks/NodeMobile.framework 与
+  Python.framework 都在。已归档进 YiPlayer_ipa。
+- **run #38（workflow_dispatch，head e5c0858）又在同一步失败，
+  同样 403**：原因不是脚本——`GITHUB_TOKEN` 默认不会自动进入
+  shell 步骤的环境变量，脚本里的 `${GITHUB_TOKEN:-}` 始终为空，
+  所以还是未认证调用；#37 只是恰好分到了有限额的跑者 IP。
+  真正的修复是 workflow 里给 Fetch Python 一步加
+  `env: GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}`（已改，未验证，
+  下一次构建见分晓）。
 
 ## v2 改了什么（相对 v1）
 
