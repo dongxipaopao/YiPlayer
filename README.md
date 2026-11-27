@@ -1,16 +1,18 @@
-# YiPlayer — 精简版视频播放器（v2.1）
+# YiPlayer — 精简版视频播放器（v2.1.1）
 
 Bundle ID `com.yiplayer.app` · SwiftUI · iOS 17+ · 无外部 Swift Package 依赖。
 参考：tvbox-silicon（Yingxia）、MarcoMovie（“marcotv”最可能的所指）、
 NOCTRA（noc.zijiu522.cn）、Rex（rexnow.tv）。调研见 `research-tvbox-marcotv.md`
 和 `research-noctra-rex-cat.md`。**本仓库不含任何片库，也不内置任何源。**
 
-v2.1 相对 v2 的变化：**修了 v2.0.0 在 LiveContainer 里实测报的 4 个问题**——
-py 源初始化失败（标准库根本没进包，见 BUILD_NOTES.md 的根因 A）、猫源
-“Node.js 运行时未包含”（代码找错了目录，根因 B）、首页红色 "cancelled"
-（被取消的任务不该当错误显示）、设置页重做（显眼的导入按钮 + 应用内
-文件浏览）。**但 v2.1 还没有在 Xcode / 真机上验证过** ——
-见 BUILD_NOTES.md 的未验证清单。
+v2.1.1 相对 v2.1 的变化：**修了 v2.1.0 在 LiveContainer 里实测仍报的
+Python 初始化失败**——报错是 "failed to read thread state"，根因是
+初始化被从不同线程重复调用（CPython 3.13 里第二次调用走重配置分支，
+当前线程没有 thread state 就失败；见 BUILD_NOTES.md 的 v2.1.1 一节）。
+修法：初始化一生只跑一次、在同一个串行队列上跑、失败结果缓存起来
+不再重试；同时补了 tvbox-silicon 配置里的 executable / utf8_mode /
+信号忽略，Node 启动线程改成 2 MB 栈。**但 v2.1.1 还没有在 Xcode /
+真机上验证过** —— 见 BUILD_NOTES.md 的未验证清单。
 
 ## v2 能做什么
 
@@ -186,9 +188,14 @@ YiPlayer/
 
 ## 许可证注意
 
-tvbox-silicon 和 MarcoMovie 都是 GPL-3.0-only。本仓库是**从头写的
-空壳**，没有复制它们的代码：`host.mjs` / `worker.mjs` 是按
+tvbox-silicon 和 MarcoMovie 都是 GPL-3.0-only。本仓库目前仍是**从头写的
+实现**，没有逐字复制它们的代码：`host.mjs` / `worker.mjs` 是按
 CatPawOpen bundle 格式自写的控制协议实现（协议本身由 bundle
 格式决定），两个下载脚本只用了 tvbox-silicon 公开脚本里的
-版本号 / SHA-256 等事实数据。**但如果你之后往里面抄了它们的代码，
-即使放在私有仓库，对外分发 IPA 时也要按 GPL 提供对应源码并保留署名。**
+版本号 / SHA-256 等事实数据；v2.1.1 按它们的参考实现改了做法
+（Python 初始化 once + 缓存失败、配置项、Node 线程栈），但
+tvbox-silicon 的 `ApplePython.c` 逐字移植不了（它用 CPython 3.14
+的 PEP 741 API，BeeWare 3.13 没有这些符号），代码仍是原创实现。
+**但只要之后往里面逐字抄了它们的代码，即使放在私有仓库，对外
+分发 IPA 时也要按 GPL 提供对应源码并保留署名和许可证头。**
+详见 BUILD_NOTES.md 末尾“移植与许可证（v2.1.1 更新）”。
