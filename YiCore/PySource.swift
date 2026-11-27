@@ -44,73 +44,267 @@ import Foundation
 //   This is NOT the 555.py MacCMS interface: no numeric vod_id,
 //   no "{id}-{sid}-{nid}" play id, no localProxy m3u8 rewriting.
 //
-// v1 STATUS: STUB. iOS has no Python runtime in this build, so every
-// call returns a clear, honest error (the same wording Yingxia uses:
-// "This source requires a Python runtime, which is not available on
-// this platform."). The call sites are already wired — dropping a real
-// host in later does not change any caller. pd.py itself is in the repo
-// (root pd.py) so v2 can load it without re-importing; YiPlayer ships
-// no video library of its own.
+// v2 STATUS: REAL. Embedded CPython 3.13 (BeeWare Python-Apple-support,
+// downloaded by Scripts/fetch-python.sh in CI, NOT committed) behind
+// the C bridge Runtime/PythonHost/ApplePython.c. The bridge exposes one
+// function — call one spider method, get JSON back — and all spider
+// logic lives in Python (Runtime/PythonHost/spiders/_yi_bridge.py).
+// pd.py runs with a minimal `base.spider` shim
+// (Runtime/PythonHost/spiders/base/spider.py: only the methods pd.py
+// actually uses) and a pure-Python `requests` stack
+// (Runtime/PythonHost/requirements.txt, installed by CI into
+// spiders/site-packages; no compiled wheels, no lxml/bs4 — pd.py
+// parses JSON only and never imports them).
 //
-// v2 path (documented in the reference research, not built here):
-// embed CPython 3.14 (BeeWare Python-Apple-support, as in Yingxia's
-// Docs/python-runtime-plan.md) behind a C bridge, one interpreter per
-// source, stdlib + requests/bs4/lxml/pycryptodome only, ~+66 MB per
-// platform. MarcoMovie's iOS native Python loader is the other proven
-// route. Either way the host must also provide pd.py's `base.spider`
-// package one level up (sys.path.append('..')) and a `requests`
-// session — a bare CPython without those will fail at import.
+// The v1 "iOS 暂不支持" fallback is kept ONLY for the case the Python
+// framework is absent at runtime (e.g. a build made before the fetch
+// step ran): EmbeddedPythonHost throws the same message then, and
+// nothing else pretends to play.
 public protocol PySourceHost: AnyObject {
     /// Load a spider file (pd.py or any CatVod py spider) for this source.
     func loadSpider(source: Source, script: String) throws
     func home(source: Source, filter: [String: String]) async throws -> [VideoItem]
-    func category(source: Source, typeID: String, page: Int) async throws -> (items: [VideoItem], pageCount: Int)
+    func categories(source: Source) async throws -> [(id: String, name: String)]
+    func category(source: Source, typeID: String, page: Int, filter: [String: String]) async throws -> (items: [VideoItem], pageCount: Int)
     func detail(source: Source, vodID: String) async throws -> VideoItem
     func search(source: Source, keyword: String, page: Int) async throws -> [VideoItem]
     func playLines(source: Source, episode: Episode) async throws -> [PlayLine]
 }
 
-/// v1 implementation: always explains itself, never pretends to play.
+// MARK: - EmbeddedPythonHost (v2, real)
+/// Runs a CatVod py spider in the embedded CPython interpreter.
+///
+/// Threading: CPython has one interpreter and one GIL. Every bridge
+/// call goes through one serial queue, so two spiders can never run
+/// at once (Yingxia's SerializedPluginWorker does the same). The
+/// blocking network calls pd.py makes (requests, 15 s timeout) happen
+/// on that background queue, never on the main thread.
+///
+/// First call cost: the interpreter initialises once per process.
+/// Expect a slow first py call (Yingxia measured ~18 s cold start in
+/// the simulator for the full plan; YiPlayer's bundle is smaller —
+/// stdlib + requests only — but the first call still loads the whole
+/// interpreter). The UI shows its normal loading state meanwhile.
 public final class EmbeddedPythonHost: PySourceHost {
     public static let unavailableMessage =
-        "iOS 暂不支持 Python 运行时（v2 嵌入 CPython，参考 Yingxia python-runtime-plan）"
+        "iOS 暂不支持 Python 运行时（Python 框架未包含在此构建中）"
+
+    private let queue = DispatchQueue(label: "com.yiplayer.python", qos: .userInitiated)
+    private var initialized = false
+    /// Last detail payload per source id, so playLines(for:) can resolve
+    /// every line for an episode number from its playGroups.
+    private var lastDetail: [String: VideoItem] = [:]
+    /// Resolved spider file path per source id.
+    private var scriptPaths: [String: String] = [:]
 
     public init() {}
 
+    // MARK: Paths
+    private static var pythonFrameworkURL: URL? {
+        Bundle.main.url(forResource: "Python", withExtension: "framework",
+                        subdirectory: "Frameworks")
+    }
+
+    private static var spidersDirURL: URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("spiders")
+    }
+
+    private static var documentsSpidersDirURL: URL {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("spiders")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    // MARK: Initialisation (lazy, once)
+    private func ensureInitialized() throws {
+        if initialized { return }
+        guard let framework = Self.pythonFrameworkURL,
+              let spiders = Self.spidersDirURL else {
+            // The framework is absent from this build: keep the honest
+            // v1 message instead of crashing or pretending.
+            throw SourceError.notSupported(Self.unavailableMessage)
+        }
+        let sitePackages = spiders.appendingPathComponent("site-packages")
+        let rc = YiPythonInitialize(
+            framework.path,
+            spiders.path,
+            sitePackages.path,
+            Self.documentsSpidersDirURL.path)
+        guard rc == 0, YiPythonIsReady() != 0 else {
+            throw SourceError.parse("Python 运行时初始化失败（错误码 \(rc)）")
+        }
+        initialized = true
+    }
+
+    // MARK: One bridge call (serial queue, GIL held inside the C call)
+    private func call(scriptPath: String, method: String, args: [Any]) async throws -> Any {
+        try ensureInitialized()
+        let argsData = try JSONSerialization.data(withJSONObject: args)
+        guard let argsJson = String(data: argsData, encoding: .utf8) else {
+            throw SourceError.parse("调用参数编码失败")
+        }
+        let raw: String? = await withCheckedContinuation { continuation in
+            queue.async {
+                guard let cString = YiPythonCallSpider(scriptPath, method, argsJson) else {
+                    continuation.resume(returning: nil as String?)
+                    return
+                }
+                defer { YiPythonFreeString(cString) }
+                continuation.resume(returning: String(cString: cString))
+            }
+        }
+        guard let raw,
+              let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw SourceError.parse("Python 桥返回了无法解析的结果")
+        }
+        guard (json["ok"] as? Bool) == true else {
+            throw SourceError.parse((json["error"] as? String) ?? "Python 调用失败")
+        }
+        return json["result"] ?? NSNull()
+    }
+
+    private func dict(_ value: Any) -> [String: Any] {
+        value as? [String: Any] ?? [:]
+    }
+
+    private func items(from result: Any, sourceID: String) -> [VideoItem] {
+        guard let list = dict(result)["list"] as? [[String: Any]] else { return [] }
+        return list.compactMap { JsonSource.videoItem(from: $0, sourceID: sourceID) }
+    }
+
+    // MARK: Spider file resolution
+    private func scriptPath(for source: Source) async throws -> String {
+        if let cached = scriptPaths[source.id] { return cached }
+        let path: String
+        if source.api.isFileURL {
+            path = source.api.path
+        } else {
+            // A remote .py URL: download once into Documents/spiders.
+            // (pd.py itself ships in the bundle; this is for spiders the
+            // user imports by URL.)
+            let (data, _) = try await URLSession.shared.data(from: source.api)
+            let file = Self.documentsSpidersDirURL
+                .appendingPathComponent("\(source.id).py")
+            try data.write(to: file, options: .atomic)
+            path = file.path
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw SourceError.parse("蜘蛛文件不存在：\(source.api.lastPathComponent)")
+        }
+        scriptPaths[source.id] = path
+        return path
+    }
+
+    // MARK: PySourceHost
     public func loadSpider(source: Source, script: String) throws {
-        // Deliberately NOT storing the script as "loaded": claiming it is
-        // ready would be a lie. The file is kept by the caller so v2 can
-        // load it without re-importing.
-        throw SourceError.notSupported(Self.unavailableMessage)
+        // Write an inline script into Documents/spiders so the bridge can
+        // load it by path on the next call. Empty script = use source.api.
+        guard !script.isEmpty else { return }
+        let file = Self.documentsSpidersDirURL.appendingPathComponent("\(source.id).py")
+        try script.write(to: file, atomically: true, encoding: .utf8)
+        scriptPaths[source.id] = file.path
     }
 
     public func home(source: Source, filter: [String: String]) async throws -> [VideoItem] {
-        throw SourceError.notSupported(Self.unavailableMessage)
+        // pd.py's homeContent returns classes/filters only, no videos.
+        // The home shelf is homeVideoContent (feed snapshot).
+        let path = try await scriptPath(for: source)
+        let result = try await call(scriptPath: path, method: "homeVideoContent", args: [])
+        return items(from: result, sourceID: source.id)
     }
 
-    public func category(source: Source, typeID: String, page: Int) async throws -> (items: [VideoItem], pageCount: Int) {
-        throw SourceError.notSupported(Self.unavailableMessage)
+    public func categories(source: Source) async throws -> [(id: String, name: String)] {
+        let path = try await scriptPath(for: source)
+        let result = try await call(scriptPath: path, method: "homeContent", args: [[String: Any]()])
+        guard let classes = dict(result)["class"] as? [[String: Any]] else {
+            // A spider without homeContent classes: fall back to pd.py's
+            // documented KINDS (all/movie/series/short_drama/anime/variety).
+            return [("all", "全部"), ("movie", "电影"), ("series", "剧集"),
+                    ("short_drama", "短剧"), ("anime", "动漫"), ("variety", "综艺")]
+        }
+        return classes.compactMap { d in
+            guard let id = d["type_id"] as? String,
+                  let name = d["type_name"] as? String else { return nil }
+            return (id, name)
+        }
+    }
+
+    public func category(source: Source, typeID: String, page: Int,
+                         filter: [String: String]) async throws -> (items: [VideoItem], pageCount: Int) {
+        let path = try await scriptPath(for: source)
+        // pd.py reads extend["window"] (day/week/month/total); default day.
+        let extend: [String: Any] = ["window": filter["window"] ?? "day"]
+        let result = try await call(scriptPath: path, method: "categoryContent",
+                                    args: [typeID, page, [String: Any](), extend])
+        let pageCount = (dict(result)["pagecount"] as? Int) ?? page
+        return (items(from: result, sourceID: source.id), pageCount)
     }
 
     public func detail(source: Source, vodID: String) async throws -> VideoItem {
-        throw SourceError.notSupported(Self.unavailableMessage)
+        let path = try await scriptPath(for: source)
+        let result = try await call(scriptPath: path, method: "detailContent", args: [[vodID]])
+        guard let item = items(from: result, sourceID: source.id).first else {
+            throw SourceError.noResult
+        }
+        lastDetail[source.id] = item
+        return item
     }
 
     public func search(source: Source, keyword: String, page: Int) async throws -> [VideoItem] {
-        throw SourceError.notSupported(Self.unavailableMessage)
+        // pd.py searchContent(key, quick) has no page parameter: it
+        // always fetches page 1. Page > 1 returns the same first page;
+        // the UI does not offer "load more" for py search.
+        let path = try await scriptPath(for: source)
+        let result = try await call(scriptPath: path, method: "searchContent",
+                                    args: [keyword, false])
+        return items(from: result, sourceID: source.id)
     }
 
     public func playLines(source: Source, episode: Episode) async throws -> [PlayLine] {
-        throw SourceError.notSupported(Self.unavailableMessage)
+        // Resolve every line for this episode number via playerContent:
+        // pd.py's play id is "<token>" or "<token>@@<line_id>".
+        let path = try await scriptPath(for: source)
+        guard let detail = lastDetail[source.id], detail.id == episode.vodID else {
+            // No detail cached (deep link straight to play): resolve the
+            // episode's own playURL if it is direct, else fail honestly.
+            if let url = episode.playURL {
+                return [PlayLine(id: episode.id, name: "线路 1", url: url)]
+            }
+            throw SourceError.noResult
+        }
+        var lines: [PlayLine] = []
+        for (lineIndex, group) in detail.playGroups.enumerated() {
+            let entryIndex = episode.number - 1
+            guard entryIndex >= 0, entryIndex < group.count else { continue }
+            let entry = group[entryIndex]
+            guard let dollar = entry.firstIndex(of: "$") else { continue }
+            let playID = String(entry[entry.index(after: dollar)...])
+                .trimmingCharacters(in: .whitespaces)
+            guard !playID.isEmpty else { continue }
+            let name = detail.playFrom.indices.contains(lineIndex)
+                ? detail.playFrom[lineIndex] : "线路 \(lineIndex + 1)"
+            let result = try await call(scriptPath: path, method: "playerContent",
+                                        args: [name, playID, ""])
+            let d = dict(result)
+            guard let urlString = d["url"] as? String, !urlString.isEmpty,
+                  let url = URL(string: urlString) else { continue }
+            let headers = d["header"] as? [String: String] ?? [:]
+            lines.append(PlayLine(id: "\(episode.vodID)-\(lineIndex)-\(episode.number)",
+                                  name: name, url: url, headers: headers))
+        }
+        guard !lines.isEmpty else { throw SourceError.noResult }
+        return lines
     }
 }
 
-// MARK: - PySource runner (wires the stub host to SourceRunner)
+// MARK: - PySource runner (wires the real host to SourceRunner)
 public final class PySource: SourceRunner {
     public let source: Source
     private let host: PySourceHost
-    /// The spider script text (e.g. pd.py), kept so v2 can load it.
-    /// v1 never executes it.
+    /// The spider script text (e.g. pd.py), kept so an inline script can
+    /// be written to Documents/spiders and loaded by path.
     public var spiderScript: String?
 
     public init(source: Source, host: PySourceHost = EmbeddedPythonHost()) {
@@ -122,8 +316,16 @@ public final class PySource: SourceRunner {
         try await host.home(source: source, filter: filter)
     }
 
+    public func categories() async throws -> [(id: String, name: String)] {
+        try await host.categories(source: source)
+    }
+
     public func category(typeID: String, page: Int) async throws -> (items: [VideoItem], pageCount: Int) {
-        try await host.category(source: source, typeID: typeID, page: page)
+        try await category(typeID: typeID, page: page, filter: [:])
+    }
+
+    public func category(typeID: String, page: Int, filter: [String: String]) async throws -> (items: [VideoItem], pageCount: Int) {
+        try await host.category(source: source, typeID: typeID, page: page, filter: filter)
     }
 
     public func detail(vodID: String) async throws -> VideoItem {
