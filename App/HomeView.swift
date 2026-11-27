@@ -154,7 +154,7 @@ struct EmptyStateView: View {
             if let actionTitle {
                 Text(actionTitle).font(.subheadline).bold()
                     .padding(.horizontal, 20).padding(.vertical, 10)
-                    .background(.accent, in: Capsule())
+                    .background(Color.accentColor, in: Capsule())
                     .foregroundStyle(.white)
             }
         }
