@@ -137,10 +137,10 @@ struct DetailView: View {
         guard let source = subscriptions.allSources.first(where: { $0.id == item.sourceID }) else { return }
         do {
             detail = try await runner(for: source).detail(vodID: item.id)
-        } catch is CancellationError {
-            // View went away mid-load: not an error, show nothing.
         } catch {
-            errorMessage = error.localizedDescription
+            // v2.1: cancellation (including URLError .cancelled) is
+            // not an error — see displayableErrorMessage.
+            errorMessage = displayableErrorMessage(error)
         }
     }
 
@@ -172,10 +172,10 @@ struct DetailView: View {
                 }
                 lines = resolved
                 playingEpisode = episode
-            } catch is CancellationError {
-                // Not an error; the user navigated away.
             } catch {
-                errorMessage = error.localizedDescription
+                // v2.1: cancellation (including URLError .cancelled)
+                // is not an error — see displayableErrorMessage.
+                errorMessage = displayableErrorMessage(error)
             }
         }
     }
