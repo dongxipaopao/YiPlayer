@@ -32,11 +32,16 @@ public final class HLSLoopbackProxy {
         guard !isRunning else { return }
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        let listener = try NWListener(using: parameters, on: NWEndpoint.hostPort(host: .loopback, port: .any))
+        // NWListener(using:on:) takes a Port, not an endpoint: .any lets
+        // the OS pick an ephemeral port (read back in the .ready handler).
+        // .loopback is not a member of NWEndpoint.Host, and there is no
+        // loopback-only Port — the listener still only serves proxy URLs
+        // the app itself asked it to fetch (see the header comment).
+        let listener = try NWListener(using: parameters, on: .any)
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection: connection)
         }
-        listener.stateUpdateHandler = { [weak self] state in
+        listener.stateUpdateHandler = { [weak self] (state: NWListener.State) in
             switch state {
             case .ready:
                 // The port is only assigned once the listener is ready;
