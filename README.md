@@ -1,9 +1,25 @@
-# YiPlayer — 精简版视频播放器（v2.1.1）
+# YiPlayer — 精简版视频播放器（v2.1.2）
 
 Bundle ID `com.yiplayer.app` · SwiftUI · iOS 17+ · 无外部 Swift Package 依赖。
 参考：tvbox-silicon（Yingxia）、MarcoMovie（“marcotv”最可能的所指）、
 NOCTRA（noc.zijiu522.cn）、Rex（rexnow.tv）。调研见 `research-tvbox-marcotv.md`
 和 `research-noctra-rex-cat.md`。**本仓库不含任何片库，也不内置任何源。**
+
+v2.1.2 相对 v2.1.1 的变化：**修了 v2.1.1 在 LiveContainer 里实测仍卡住的
+Python 导入失败**——初始化已经过了（"failed to read thread state"
+消失），但 `_yi_bridge` 导入失败（错误码 5）。根因不是文件缺失：
+`PyConfig.module_search_paths` 里手填的路径在初始化中途被 CPython
+的 getpath 重算丢弃了，`sys.path` 里从来没有 spiders 目录（本机用
+真实 CPython 3.12、同样的配置形状做了 5 组对照实验复现并验证了修法，
+见 BUILD_NOTES.md 的 v2.1.2 一节）。修法：初始化成功后在 C 里显式
+把 5 个目录插进 `sys.path` 再导入 `_yi_bridge`；导入前先校验
+`_yi_bridge.py` 文件确实存在；导入再失败时把 Python 异常的真实内容
+（类型、消息、traceback）加当时的 `sys.path` 一起记进错误，不再猜。
+**同时修了猫源“有分类没内容、搜索没结果、界面一声不吭”**：
+`/category`、`/search`、`/detail` 收到没有 `list` 的返回时不再静默
+返回空列表，而是把原始响应（截取前 300 字）报出来——真正空的
+分类/搜索（返回里有空 `list`）仍静默显示空状态。**但 v2.1.2 还没有
+在 Xcode / 真机上验证过** —— 见 BUILD_NOTES.md 的未验证清单。
 
 v2.1.1 相对 v2.1 的变化：**修了 v2.1.0 在 LiveContainer 里实测仍报的
 Python 初始化失败**——报错是 "failed to read thread state"，根因是
@@ -11,8 +27,7 @@ Python 初始化失败**——报错是 "failed to read thread state"，根因�
 当前线程没有 thread state 就失败；见 BUILD_NOTES.md 的 v2.1.1 一节）。
 修法：初始化一生只跑一次、在同一个串行队列上跑、失败结果缓存起来
 不再重试；同时补了 tvbox-silicon 配置里的 executable / utf8_mode /
-信号忽略，Node 启动线程改成 2 MB 栈。**但 v2.1.1 还没有在 Xcode /
-真机上验证过** —— 见 BUILD_NOTES.md 的未验证清单。
+信号忽略，Node 启动线程改成 2 MB 栈。
 
 ## v2 能做什么
 
@@ -89,7 +104,10 @@ Python 初始化失败**——报错是 "failed to read thread state"，根因�
   bundle 也要几秒。
 - 9280 bundle 的 `/config` 返回形状和 `/play` 返回形状是按
   CatPawOpen 惯例推断的，**没有对真实 bundle 验证过**——如果
-  v2.1 装上后猫源列表是空的或播不了，大概率是这里要按真实返回改。
+  v2.1.2 装上后猫源列表是空的或播不了，大概率是这里要按真实返回改。
+  猫源 `/category`、`/search`、`/detail` 现在会对没有 `list` 的返回
+  直接报错并贴出原始响应（v2.1.2），不再静默空白——如果装上后看到
+  这条报错，把它截图发回来，那就是下一步要修的证据。
 - 下载/离线、直播、弹幕、Trakt/iCloud 同步、浅色主题、tvOS、
   多端同步、云盘/音乐/漫画/小说——都没有。
 - **未签名 IPA 装不到手机上就能用。** CI 产物是未签名包，装机要
@@ -183,7 +201,7 @@ YiPlayer/
   进 `Runtime/PythonHost/spiders/pd.py`，以根目录的为准）；
   `base.spider` 最小兼容包已写好；`catvodsub.txt` 里只有 9280
   那个猫源地址，以后有别的订阅地址加到这个文件里就行。
-  唯一要用户做的：装好 v2.1 后试一遍 py 源和猫源能不能播，
+  唯一要用户做的：装好 v2.1.2 后试一遍 py 源和猫源能不能播，
   播不了把报错截图发回来。
 
 ## 许可证注意
