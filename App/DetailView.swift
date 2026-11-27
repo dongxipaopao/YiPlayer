@@ -137,6 +137,8 @@ struct DetailView: View {
         guard let source = subscriptions.allSources.first(where: { $0.id == item.sourceID }) else { return }
         do {
             detail = try await runner(for: source).detail(vodID: item.id)
+        } catch is CancellationError {
+            // View went away mid-load: not an error, show nothing.
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -151,9 +153,27 @@ struct DetailView: View {
         Task {
             defer { isLoadingLines = false }
             do {
-                lines = try await runner(for: source).playLines(for: episode)
-                guard !lines.isEmpty else { errorMessage = "没有找到相关资源"; return }
+                var resolved = try await runner(for: source).playLines(for: episode)
+                guard !resolved.isEmpty else { errorMessage = "没有找到相关资源"; return }
+                // v1 always played lines.first and ignored the line the
+                // user picked in the capsule row. The picked line goes
+                // first (PlayerView plays lines in order); the rest stay
+                // available as fallbacks. Match by the line index baked
+                // into the PlayLine id ("<vodID>-<lineIndex>-<number>"),
+                // not by position — a line that fails to resolve is
+                // skipped, so positions shift but ids do not.
+                let pickedSuffix = "-\(selectedLine)-\(episode.number)"
+                if let pickedIndex = resolved.firstIndex(where: { $0.id.hasSuffix(pickedSuffix) }) {
+                    let picked = resolved.remove(at: pickedIndex)
+                    resolved.insert(picked, at: 0)
+                } else if selectedLine < resolved.count {
+                    let picked = resolved.remove(at: selectedLine)
+                    resolved.insert(picked, at: 0)
+                }
+                lines = resolved
                 playingEpisode = episode
+            } catch is CancellationError {
+                // Not an error; the user navigated away.
             } catch {
                 errorMessage = error.localizedDescription
             }
