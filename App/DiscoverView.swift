@@ -122,10 +122,10 @@ struct DiscoverView: View {
             items = result.items
             pageCount = result.pageCount
             errorMessage = nil
-        } catch is CancellationError {
-            // View went away mid-load: not an error.
         } catch {
-            errorMessage = error.localizedDescription
+            // v2.1: cancellation (including URLError .cancelled) is
+            // not an error — see displayableErrorMessage.
+            errorMessage = displayableErrorMessage(error)
         }
     }
 
@@ -137,9 +137,8 @@ struct DiscoverView: View {
                 .category(typeID: selectedCategory, page: page, filter: filter)
             items.append(contentsOf: result.items)
             pageCount = result.pageCount
-        } catch is CancellationError {
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = displayableErrorMessage(error)
         }
     }
 }
