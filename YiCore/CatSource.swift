@@ -213,7 +213,7 @@ public final class CatSource: SourceRunner {
         try await ensureLoaded()
         if isServerBundle {
             let text = try await nodeCall(params: ["t": typeID, "pg": "\(page)"])
-            return (items(from: text), pageCount(from: text) ?? page)
+            return (try items(from: text, route: "/category"), pageCount(from: text) ?? page)
         }
         return try await runtime.category(source: source, typeID: typeID, page: page)
     }
@@ -229,7 +229,7 @@ public final class CatSource: SourceRunner {
         try await ensureLoaded()
         if isServerBundle {
             let text = try await nodeCall(params: ["ids": vodID])
-            guard let item = items(from: text).first else { throw SourceError.noResult }
+            guard let item = try items(from: text, route: "/detail").first else { throw SourceError.noResult }
             lastDetail = item
             return item
         }
@@ -238,7 +238,7 @@ public final class CatSource: SourceRunner {
 
     public func search(keyword: String, page: Int) async throws -> [VideoItem] {
         try await ensureLoaded()
-        if isServerBundle { return try await nodeItems(params: ["wd": keyword, "pg": "\(page)"]) }
+        if isServerBundle { return try await nodeItems(params: ["wd": keyword, "pg": "\(page)"], route: "/search") }
         return try await runtime.search(source: source, keyword: keyword, page: page)
     }
 
@@ -270,8 +270,37 @@ public final class CatSource: SourceRunner {
         return list.compactMap { JsonSource.videoItem(from: $0, sourceID: source.id) }
     }
 
+    /// Strict list parse, for /category, /search and /detail (server
+    /// bundles only). A JSON answer WITH a "list" key — even an empty
+    /// one — is a genuine answer: a category or a search can
+    /// legitimately be empty, and that stays a silent empty state.
+    /// An answer WITHOUT a "list" key means the bundle answered
+    /// something else entirely (wrong route, wrong request fields,
+    /// an error object, HTML) — throw with the raw text, so the next
+    /// device test shows the real reason instead of a blank page.
+    /// v2.1.1 returned [] for all of these, so the 9280 tab showed
+    /// "这个分类没有内容" with no error and no diagnostic, and search
+    /// "奥德赛" showed nothing at all — the Node response never
+    /// reached the UI. home() deliberately keeps the lenient parse
+    /// above: /home may legitimately be classes-only, and HomeView
+    /// already falls through to the next source on an empty home.
+    private func items(from text: String, route: String) throws -> [VideoItem] {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw SourceError.parse("猫源\(route)返回了无法解析的结果：\(String(text.prefix(300)))")
+        }
+        guard let list = json["list"] as? [[String: Any]] else {
+            throw SourceError.parse("猫源\(route)返回的结果里没有 list：\(String(text.prefix(300)))")
+        }
+        return list.compactMap { JsonSource.videoItem(from: $0, sourceID: source.id) }
+    }
+
     private func nodeItems(params: [String: Any]) async throws -> [VideoItem] {
         items(from: try await nodeCall(params: params))
+    }
+
+    private func nodeItems(params: [String: Any], route: String) async throws -> [VideoItem] {
+        try items(from: try await nodeCall(params: params), route: route)
     }
 
     private func pageCount(from text: String) -> Int? {
