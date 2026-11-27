@@ -54,8 +54,18 @@ public final class NodeHost {
     private init() {}
 
     // MARK: Locations
+    // v2.1: host.mjs + worker.mjs are bundle-ROOT resources
+    // (project.yml lists them with `buildPhase: resources`, and the
+    // v2.0.0 IPA listing proves they land at
+    // Payload/YiPlayer.app/host.mjs). v2.0.0 looked for them in a
+    // nodehost/ subdir that never existed, so isAvailable was always
+    // false and every cat call failed with "Node.js 运行时未包含在
+    // 此构建中". host.mjs loads the worker with
+    // `new URL('./worker.mjs', import.meta.url)`, i.e. relative to
+    // its own location — both files at the bundle root keeps that
+    // reference working unchanged.
     private static var nodeHostDirURL: URL? {
-        Bundle.main.resourceURL?.appendingPathComponent("nodehost")
+        Bundle.main.resourceURL
     }
 
     private static var supportDirURL: URL {
@@ -90,8 +100,13 @@ public final class NodeHost {
     }
 
     private func start() async throws {
-        guard isAvailable, let dir = Self.nodeHostDirURL else {
-            throw SourceError.notSupported(Self.unavailableMessage)
+        guard let dir = Self.nodeHostDirURL,
+              FileManager.default.fileExists(atPath: dir.appendingPathComponent("host.mjs").path),
+              FileManager.default.fileExists(atPath: dir.appendingPathComponent("worker.mjs").path) else {
+            // Name the exact directory that was checked, so the next
+            // "未包含" report can be told apart from a missing file.
+            throw SourceError.notSupported(
+                "\(Self.unavailableMessage)（在 \(Self.nodeHostDirURL?.path ?? "未知目录") 下未找到 host.mjs / worker.mjs）")
         }
         let main = dir.appendingPathComponent("host.mjs")
         // Touch the relisten file so host.mjs can watch it.
@@ -102,7 +117,7 @@ public final class NodeHost {
         try? FileManager.default.removeItem(at: controlFileURL)
         let rc = YiNodeStart(main.path, controlFileURL.path, relistenFileURL.path)
         guard rc == 0 || YiNodeIsRunning() != 0 else {
-            throw SourceError.parse("Node.js 启动失败（错误码 \(rc)）")
+            throw SourceError.parse("Node.js 启动失败（错误码 \(rc)，入口 \(main.path)，控制文件 \(controlFileURL.path)）")
         }
         // Wait for host.mjs to announce its control port (up to 30 s).
         let deadline = Date.now.addingTimeInterval(30)
@@ -114,7 +129,7 @@ public final class NodeHost {
             }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
-        throw SourceError.parse("Node.js 启动超时（30 秒内未就绪）")
+        throw SourceError.parse("Node.js 启动超时（30 秒内未就绪，控制文件 \(controlFileURL.path)）")
     }
 
     private func refreshControl() {
