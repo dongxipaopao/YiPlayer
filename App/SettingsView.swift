@@ -35,8 +35,10 @@ struct SettingsView: View {
     @State private var showFilePicker = false
     @State private var showClearHistoryConfirm = false
     /// Discovered cat sites per source id (from the bundle's /config).
-    @State private var catSites: [String: [(key: String, name: String)]] = [:]
+    @State private var catSites: [String: [CatSite]] = [:]
     @State private var loadingSitesFor: String?
+    /// Subscription currently being expanded into many sources.
+    @State private var expandingFor: UUID?
     /// Files found in the app's Documents (in-app file browser).
     @State private var localFiles: [LocalImportFile] = []
 
@@ -60,12 +62,14 @@ struct SettingsView: View {
                             Button("清除", role: .destructive) { history.clear() }
                         }
                 }
-                Section("关于 v2.1") {
-                    Text("YiPlayer 2.1.0\n• 支持：TVBox JSON type 1/4、py 源（内嵌 CPython）、猫源（JavaScriptCore 有界宿主 + 内嵌 Node.js 服务端 bundle）\n• 首次打开已预置懂片帝和 9280 猫源，不用先导入\n• 不含内置片库、云盘、音乐、漫画、小说")
+                Section("关于 v2.1.4") {
+                    Text("YiPlayer 2.1.4\n• 支持：TVBox JSON type 1/4、py 源（内嵌 CPython）、猫源（JavaScriptCore 有界宿主 + 内嵌 Node.js 服务端 bundle）\n• 首次打开已预置懂片帝和 9280 猫源，不用先导入\n• 不含内置片库、云盘、音乐、漫画、小说")
                         .font(.subheadline)
                     Text("py 源：内嵌 CPython 3.13 运行 pd.py（懂片帝）。首次调用会慢一些（解释器冷启动），之后正常。")
                         .font(.subheadline).foregroundStyle(.secondary)
                     Text("猫源：9280 那个 Fastify 服务端 bundle 走内嵌 Node.js 26 运行；真正的 websiteBundle 仍走 JavaScriptCore。")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    Text("v2.1.4：一个服务端 bundle 可以展开成几十个独立的源（下面“猫源站点”里点“展开全部站点”），在发现页按 bundle 自带的分组（4K、秒播……）显示；豆瓣站的详情是聚合入口，没有线路时会按片名去 bundle 里别的站找线路。")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
             }
@@ -195,31 +199,56 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Cat site picker (server-bundle sources only)
+    // MARK: - Cat sites: expand one bundle into many sources (v2.1.4)
+    /// Subscriptions that contain at least one cat source.
+    private var catSubscriptions: [Subscription] {
+        subscriptions.subscriptions.filter { $0.sources.contains(where: { $0.kind == .cat }) }
+    }
+
     @ViewBuilder
     private var catSiteSection: some View {
-        let catSources = subscriptions.allSources.filter { $0.kind == .cat }
-        if !catSources.isEmpty {
+        if !catSubscriptions.isEmpty {
             Section("猫源站点") {
-                Text("服务端 bundle（比如 9280）里有多个站点，默认用 /config 返回的第一个。这里可以切换。")
+                Text("服务端 bundle（比如 9280）里有几十上百个站点。点“展开全部站点”，就把一个 bundle 展开成几十个独立的源（按 bundle 自带的分组显示），在发现页和搜索里分别进、分别搜；也可以只切换单个站点。")
                     .font(.footnote).foregroundStyle(.secondary)
-                ForEach(catSources) { source in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(source.name).font(.headline)
-                        if let sites = catSites[source.id], !sites.isEmpty {
-                            Picker("站点", selection: siteKeyBinding(for: source)) {
-                                ForEach(sites, id: \.key) { site in
-                                    Text(site.name).tag(site.key)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                        } else {
-                            Text("当前站点：\(currentSiteKey(for: source))（未加载过站点列表）")
+                ForEach(catSubscriptions) { sub in
+                    let sources = sub.sources.filter { $0.kind == .cat }
+                    if sources.count > 1 || sources.first?.spider?.hasPrefix("/") == true {
+                        // Expanded: the subscription already owns one
+                        // source per site — show the count + groups,
+                        // and offer a re-load of the site list.
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(sub.name).font(.headline)
+                            Text("已展开为 \(sources.count) 个站\(groupSummary(for: sources))")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Button(loadingSitesFor == source.id ? "加载中…" : "加载站点列表") {
-                                Task { await loadCatSites(for: source) }
+                            Button(expandingFor == sub.id ? "加载中…" : "重新加载站点列表") {
+                                Task { await expandCatSites(for: sub) }
                             }
-                            .disabled(loadingSitesFor != nil)
+                            .disabled(expandingFor != nil)
+                        }
+                    } else if let source = sources.first {
+                        // Legacy single source: site picker + expand.
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(source.name).font(.headline)
+                            if let sites = catSites[source.id], !sites.isEmpty {
+                                Picker("站点", selection: siteKeyBinding(for: source)) {
+                                    ForEach(sites, id: \.api) { site in
+                                        Text(site.name).tag(site.api)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                            } else {
+                                Text("当前站点：\(currentSiteName(for: source))（未加载过站点列表）")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button(loadingSitesFor == source.id ? "加载中…" : "加载站点列表") {
+                                    Task { await loadCatSites(for: source) }
+                                }
+                                .disabled(loadingSitesFor != nil)
+                            }
+                            Button(expandingFor == sub.id ? "展开中…" : "展开全部站点") {
+                                Task { await expandCatSites(for: sub) }
+                            }
+                            .disabled(expandingFor != nil)
                         }
                     }
                 }
@@ -227,8 +256,58 @@ struct SettingsView: View {
         }
     }
 
+    /// "（4K 11 个、秒播 11 个、体育 6 个……）" — the biggest groups
+    /// first, at most 4 named, for the expanded-subscription summary.
+    private func groupSummary(for sources: [Source]) -> String {
+        var counts: [(String, Int)] = []
+        for group in sources.map(\.group) where !group.isEmpty {
+            if let i = counts.firstIndex(where: { $0.0 == group }) { counts[i].1 += 1 }
+            else { counts.append((group, 1)) }
+        }
+        guard !counts.isEmpty else { return "" }
+        let top = counts.sorted { $0.1 > $1.1 }.prefix(4)
+        return "（" + top.map { "\($0.0) \($0.1) 个" }.joined(separator: "、")
+            + (counts.count > 4 ? "……" : "") + "）"
+    }
+
+    /// Expand one bundle subscription into one Source per site
+    /// (v2.1.4). The subscription's sources are replaced with the
+    /// expanded list — the subscription keeps owning them, and the
+    /// old single source id disappears (Discover falls back to the
+    /// first visible source). All expanded sources share one bundle
+    /// file/worker on disk (see CatSource.startServerBundle), so this
+    /// does not start one Node worker per site.
+    private func expandCatSites(for sub: Subscription) async {
+        guard let legacy = sub.sources.first(where: { $0.kind == .cat }) else { return }
+        expandingFor = sub.id
+        defer { expandingFor = nil }
+        do {
+            let runner = CatSource(source: legacy)
+            let expanded = try await runner.expandedSources()
+            guard !expanded.isEmpty else {
+                setImportMessage("「\(sub.name)」没有返回可展开的站点。", isError: true)
+                return
+            }
+            subscriptions.refreshSucceeded(id: sub.id, sources: expanded)
+            setImportMessage("「\(sub.name)」已展开为 \(expanded.count) 个源\(groupSummary(for: expanded))，在发现页按分组显示，搜索会同时搜这些站。", isError: false)
+        } catch {
+            setImportMessage("展开「\(sub.name)」失败：\(displayableErrorMessage(error) ?? "已取消")", isError: true)
+        }
+    }
+
     private func currentSiteKey(for source: Source) -> String {
         UserDefaults.standard.string(forKey: "yiplayer.cat.site.\(source.id)") ?? "douban"
+    }
+
+    /// Display name of the currently selected site, when the site
+    /// list has been loaded; otherwise the stored key itself.
+    private func currentSiteName(for source: Source) -> String {
+        let stored = currentSiteKey(for: source)
+        if let sites = catSites[source.id],
+           let site = sites.first(where: { $0.api == stored || $0.key == stored }) {
+            return site.name
+        }
+        return stored
     }
 
     private func siteKeyBinding(for source: Source) -> Binding<String> {
