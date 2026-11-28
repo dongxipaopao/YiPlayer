@@ -203,10 +203,30 @@ struct EmptyStateView: View {
 /// Pick the right runner for a source kind. v2: py runs through the
 /// embedded CPython host, cat through JavaScriptCore or the embedded
 /// Node.js server host — the call site never changes.
+/// One runner per source id, shared by every view (v2.1.4).
+/// CatSource / JsonSource / PySource keep their last detail payload in
+/// instance state (lastDetail), and DetailView loads detail on one call
+/// and resolves play lines on a later call — with a fresh runner per
+/// call, playLines would always see lastDetail == nil and throw
+/// "no result" for every token-based play id (i.e. every MacCMS/cat
+/// line). The cache makes loadDetail -> play share one runner per
+/// source. Runners are created lazily and never recreated for the same
+/// id; an expanded subscription's sources have new ids, so they get
+/// new runners. The lock is the only synchronisation: runner methods
+/// are async and already tolerate being called from any executor
+/// (the Python host serialises its own calls).
+private let runnerCacheLock = NSLock()
+private var runnerCache: [String: any SourceRunner] = [:]
+
 func runner(for source: Source) -> any SourceRunner {
+    runnerCacheLock.lock(); defer { runnerCacheLock.unlock() }
+    if let existing = runnerCache[source.id] { return existing }
+    let created: any SourceRunner
     switch source.kind {
-    case .cat: return CatSource(source: source)
-    case .py: return PySource(source: source)
-    case .jsonType1, .jsonType4: return JsonSource(source: source)
+    case .cat: created = CatSource(source: source)
+    case .py: created = PySource(source: source)
+    case .jsonType1, .jsonType4: created = JsonSource(source: source)
     }
+    runnerCache[source.id] = created
+    return created
 }
