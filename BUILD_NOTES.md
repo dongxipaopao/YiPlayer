@@ -1,10 +1,11 @@
-# BUILD_NOTES.md — 假设与未验证项（v2.1.3）
+# BUILD_NOTES.md — 假设与未验证项（v2.1.4）
 
-本文件列出构建 YiPlayer v1 + v2 + v2.1 + v2.1.1 + v2.1.2 + v2.1.3 时做的每一个假设和每一条未验证的说法。
-**v2.1.3 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
+本文件列出构建 YiPlayer v1 + v2 + v2.1 + v2.1.1 + v2.1.2 + v2.1.3 + v2.1.4 时做的每一个假设和每一条未验证的说法。
+**v2.1.4 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
 macOS / Xcode；只做了 YAML 语法、Swift 括号平衡、Python/JS 语法、
-以及文件引用完整性等静态检查（见“已验证”），外加 worker.mjs 与
-parseSites 算法的合成测试（见“v2.1.3 改了什么”）。
+以及文件引用完整性等静态检查（见“已验证”），外加对真实 9280 bundle
+的本机 Node 24 实测（见“v2.1.4 改了什么”——bundle 真的跑起来了，
+但那是 Linux 沙盒网络，不是真机）。
 v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
 见“v1 历史”）；v2 的构建也是真的（Actions run #22 成功，23.4 MB
 未签名 IPA，见“v2 构建实录”），用户已在 LiveContainer 里装了 v2.0.0，
@@ -23,7 +24,176 @@ Python 初始化已过、但 `_yi_bridge` 导入失败（错误码 5），v2.1.2
 2026-11-28 08:37 直接授权做 v2.1.3，不等 2.1.2 的测试截图——
 2026-11-28 早上直接读 9280 bundle 实时代码，已确认“有分类没
 内容”的两个根因不在解析，而在启动方式和 /config 形状，修法都
-想好了（见“v2.1.3 改了什么”）。
+想好了（见“v2.1.3 改了什么”）；v2.1.3 也已构建成功
+（Actions run #46089344677，31.3 MB IPA，v2.1.3 build 6），用户
+2026-11-28 11:37 在 LiveContainer 里实测：bundle 真的跑起来了
+（搜索能用，详情页《巴黎绽放的星辰》有海报、标题和评分 7.2），
+但详情页没有线路、没有选集（/detail 返回 {}），且同一个 bundle
+在 Yingxia 里是几十个源、在 YiPlayer 里只有 1 个——v2.1.4 就是
+针对这两个修的（见“v2.1.4 改了什么”）。
+
+## v2.1.4 改了什么（相对 v2.1.3）
+
+背景：用户 2026-11-28 11:37 真机实测 v2.1.3。两个问题：
+(1) 详情页《巴黎绽放的星辰》有海报、标题、评分 7.2，但没有
+线路、没有选集，红字报错“解析失败：猫源 /detail 返回的结果里
+没有 list：{}”。(2) 同一个 9280 猫源链接，Yingxia 解析出几十个
+源（分组 chips + 逐条站点），YiPlayer 只显示 1 个源（douban）。
+2026-11-28 当天重新下载 bundle 并对 .md5（仍是
+d8e69da8c37a29afe50fdc8de9dbf268，和 2026-11-27 一致，文件没换
+过），再用 Node 24 在本机把真实 bundle 跑起来实测（不是合成
+假包），两个根因都确认了。
+
+### 根因 A：/detail 返回 {} 是 bundle 自己的答案，不是请求写错了
+
+证据（bundle 代码 + 本机 Node 24 实测）：
+
+- Fastify 路由是直接绑定的：`t.detail&&o.post("/detail",
+  t.detail.bind(t))`——不包装、不加字段。蜘蛛读的就是
+  `body?.id`（其它蜘蛛：`Array.isArray(n.body?.id)?n.body.id:
+  [n.body?.id]`），正是 host.mjs 已发的 `{id}`（host.mjs:252）；
+  host.mjs 每次调用前也早调过 /init（host.mjs:245，404 容忍），
+  而豆瓣蜘蛛的 init 只处理 extend/ext，本来就是空操作。所以
+  **没有任何 body 字段、type 或初始化步骤能修这个 {}**。
+- 豆瓣蜘蛛（工厂 `_c0`，meta `{key:"douban",name:"豆瓣|首页",
+  type:3}`）的 home/分类是真的（拉 frodo.douban.com 热榜，
+  条目 id 由 mc0 写成 `msearch:<豆瓣 id>`，所以海报/标题/评分
+  都正常），但 detail/search/play 全是空壳：
+  `async detail(){return{}},async play(){return{}},async search(){return{}}`——
+  全 bundle 仅有的两处空壳三元组，另一处是工厂 `J70`，meta
+  `{key:"gengxin",name:"日期:20261127",type:3}`，就是那个日期戳。
+- 本机实测（Node 24，真实 bundle，端口 19098）：
+  `POST /spider/douban/3/detail {"id":"msearch:123"}` → `{}`；
+  `{"id":""}` → `{}`。和真机报错一字不差。
+- 其它蜘蛛的 detail 是真的，例如玩偶 wogg：
+  `async detail(l){...for(let g of d.filter(Boolean)){let y=await
+  qWt(c.siteUrl,g,e);m.push(y)}return x0(m)}`，观影 guanying
+  同款（经 ljt）。线路存在，只是**不在豆瓣名下**。
+
+修法（`YiCore/CatSource.swift`，`detail(vodID:title:)` 聚合兜底）：
+
+- 先照旧调自己的 /detail；只有当 bundle 有返回但没有 `list`
+  （严格解析抛“没有 list”），且 id 是 `msearch:` 开头、标题
+  非空时，才走兜底——别的失败（网络错、非 JSON）不走兜底，
+  直接抛原错。
+- 兜底：取 bundle 里除当前站外的前 8 个内容站，并行搜片名
+  （TaskGroup；标题归一化：小写、去空白和标点，所以
+  “巴黎绽放的星辰”能匹配带年份后缀的标题），按 /config 顺序
+  取第一个标题匹配，再调那个站的 /detail 拿线路；`/play` 也走
+  那个站的路由（`VideoItem.resolvedSiteAPI`，见下）。
+- 每个站的搜索限 12 秒（TaskGroup 里与 sleep 竞速）：本机实测
+  里一个 4K 站的上游挂了 45 秒以上才超时，不限时会把整个
+  详情页拖到 Node 的 60 秒请求超时。
+- 只接受**带线路**的兜底详情（`playGroups` 非空）：本机实测里
+  观影的 /detail 对《哪吒》返回了完整元数据（1974 年、演员、
+  导演），但 `vod_play_from` / `vod_play_url` 是空的——收下它
+  等于还是空白详情页，所以继续试下一个匹配的站。
+- 再失败时报错贴出：本次 /detail 的 route + body（`{id: …}`）、
+  原始返回前 300 字、试过的站名；匹配到了标题但逐站调 /detail
+  都没线路时，另写明最后错误。保持 v2.1.2 的严格报错风格。
+- `Source` 协议新增 `detail(vodID:title:)`（带默认实现转调
+  旧方法，所以 JsonSource / PySource 不用改），`DetailView`
+  调它；`VideoItem` 新增 `resolvedSiteAPI`（哪个站实际给了
+  详情，`/play` 就调哪个站）。
+
+兜底的前提验证（本机 Node 24，真实 bundle）与**诚实提醒**：
+
+- 链路本身是通的：观影 `/search {"wd":"哪吒"}` 返回真实条目
+  （`vod_id: "gy:eyJ..."`，片名“哪吒”），`/detail` 返回
+  `{"list":[...]}`。所以“兄弟站搜索 → 兄弟站详情”这个机制
+  在 bundle 层面是成立的。
+- **但《巴黎绽放的星辰》在本机沙盒里没找到**：按 /config 顺序
+  的前 8 个内容站（我的网盘、玩偶、观影、多多、虎斑、木偶、
+  快映、蜡笔）搜它，结果是 404 / 403 / 500 / 超时，只有观影
+  正常返回空列表 `{"list":[]}`。玩偶搜《哪吒》也 403。这很可能
+  是**沙盒网络的问题**（数据中心 IP 被上游拦，或上游在沙盒里
+  不通），不是片子不存在——手机网络（用户在国内）下这些站
+  很可能正常。但**在真机上验证之前，不要承诺兜底一定能找到
+  这部片的线路**；真机上如果兜底报“搜了一圈也没找到”，报错
+  里会列出试过的站，那就是下一步的证据。
+- 豆瓣站展开后标记为不可搜索（`isSearchable: false`）：它的
+  search 也是空壳，搜它只会稳定报“没有 list”；它在发现页
+  仍可浏览（home/分类是真的）。
+
+### 根因 B：一个 bundle 在 YiPlayer 里只有一个源
+
+证据（本机 Node 24 实测，真实 bundle 的 GET /config）：
+
+- video 组 **93 个站**，每条是 `{key:"nodejs_<key>",
+  name:"名字|分组",type:3,searchable,api:"/spider/<key>/<type>"}`。
+  前 5 条：豆瓣|首页（/spider/douban/3）、日期:20261127
+  （gengxin）、配置|中心（baseset，searchable=0）、我的|网盘、
+  玩偶|4K。read/comic/music/pan 四组**全是空数组**——只有
+  video 有站。
+- 分组就是名字里 `|` 后面的标签：93 条里 91 条带 `|`，共 **33
+  个不同分组**（4K 16 个、秒播 16 个、音乐 6 个、体育 6 个、
+  动漫 5 个、直播 4 个、听书/少儿/课堂各 3 个……）。不带 `|`
+  的只有 gengxin（日期戳）和 push（推送）两条——本来就要排除。
+- Yingxia 截图里的分组名（推荐/摸鱼/蝴蝶/牛二/搜剧）在 bundle
+  全文出现 **0 次**——是 Yingxia 自己的分组，**不照抄**。
+  YiPlayer 的分组只用 bundle 自带的 `|标签`（没有标签时用
+  video/read/comic/music/pan 组名）。
+- 排除依据（只按证据排除，不猜）：type 4 的 `push`（推送，
+  是推送接口不是站）；searchable=0 的 `baseset`（配置|中心）；
+  名字以“日期:”开头的 `gengxin`（日期戳，detail/search/play
+  也是空壳）。93 − 3 = **90 个内容站**。
+
+修法：
+
+- `CatSource.expandedSources()`：/config 每条内容站变成一个
+  独立的 `Source`（名字是 `|` 前的部分，分组是 `|` 后的标签，
+  `spider` 就是它自己的 api 路由，如 `/spider/guanying/3`，
+  `isSearchable` 沿用 /config——豆瓣除外，见上）。原有的单
+  siteKey 选择器保留作兼容（未展开的单个源仍能切站），但不
+  再是唯一入口。
+- 设置 → 猫源站点：未展开的 bundle 订阅多一个“展开全部站点”
+  按钮，展开后用 `refreshSucceeded` 把订阅的源换成展开后的
+  列表（订阅本身不变），并显示“已展开为 90 个站（4K 16 个、
+  秒播 16 个……）”+“重新加载站点列表”；已展开的订阅不再显示
+  90 个站点选择器（原来会渲染 90 个）。
+- 发现页：分组 chips（只在有分组的源时出现，“全部”+ 各分组），
+  源选择器只显示当前分组的源；选中的源被分组过滤掉或被展开
+  替换掉时，回落到第一个可见源，不会空白。
+- 搜索页：改并行（TaskGroup）——展开后有 ~90 个可搜源，串行
+  搜要几分钟；并行后总耗时约等于最慢的单个搜索；结果仍按
+  /config 顺序合并，单个源报错只记该源、不当成“没结果”。
+- **展开后所有站共用一个 bundle 文件和一个 Node worker**：
+  host.mjs 按 bundle 文件路径起 worker（`bundles` Map 以文件
+  路径为键），一站一个文件会起 ~90 个 Fastify 服务器——所以
+  `startServerBundle` 的写盘目录改成按 bundle 来源 URL 的 MD5
+  （`YiPlayer/cat/bundle-<md5(api)>`），所有同 bundle 的源共用
+  一个文件、一个 worker、一个 profile 目录；文件内容没变时
+  不重写（90 个实例不再重复写 6 MB）。同理，bundle 下载也改
+  成按 URL 共享在途任务（`sharedBundleText`）：展开后第一次
+  并行搜索不再把同一个 6 MB 文件下载 90 次；任务结束（成功
+  或失败）就从缓存里清掉，之后再加载会重新下载——服务端
+  更新的 bundle 不会被旧缓存顶掉。
+- 顺带修了一个播放链上的潜 bug（读代码发现，真机还没走到播
+  放所以没报出来）：`runner(for:)` 原来每次都 new 一个
+  CatSource/JsonSource/PySource，而 `playLines(for:)` 依赖实例
+  里的 `lastDetail`——DetailView 先在 loadDetail 的 runner 上
+  拿详情，再在 play 的**新** runner 上解析线路，`lastDetail`
+  永远是 nil，token 类 playid 会直接报“没有找到相关资源”。
+  现在 `runner(for:)` 按 source id 缓存一个 runner（NSLock
+  保护），loadDetail → play 共用一个实例。JsonSource/PySource
+  同样受益（它们也是 lastDetail 模式）。
+
+### 仍未验证（v2.1.4）
+
+- **最关键的两项**：真机上展开后 9280 是不是 90 个站、发现页
+  分组对不对；豆瓣站《巴黎绽放的星辰》的详情页兜底能不能找到
+  线路并播出来（本机沙盒里前 8 站对这部片全灭，见上——手机
+  网络可能不同，真机结果为准）。
+- 展开后 90 个源的 Discover/Home/Search 性能与内存：设计上
+  只有一个 Node worker、一次 bundle 下载，但**没有在真机上
+  测过**——如果发现页卡或内存暴涨，先看是不是 90 个源同时在
+  load（HomeView 依次试每个源的 home，第一个有内容的胜出；
+  懂片帝排第一，通常到不了猫源）。
+- 豆瓣站展开后在发现页的 home/分类是否仍正常（它的 home/分
+  类是真的，但展开后它只是 90 个源之一）；`http://www.y456y.com`
+  的 ATS；LiveContainer 内置文件浏览器；图标显示；冷启动时间。
+- 版本：2.1.4 / build 7（三处一致：project.yml settings.base、
+  target info.properties、App/Info.plist）。
 
 ## v2.1.3 改了什么（相对 v2.1.2）
 
