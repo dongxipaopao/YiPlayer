@@ -25,6 +25,13 @@ public struct VideoItem: Identifiable, Hashable, Codable {
     /// is the "Name$playid" entry for episode j on line i. Kept so
     /// playLines(for:) can resolve every line for one episode number.
     public var playGroups: [[String]]
+    /// The site route that actually served this item's detail (v2.1.4).
+    /// Set only by the CatSource aggregator fallback: a douban-style
+    /// item has no /detail of its own, so its lines come from another
+    /// site in the same bundle (e.g. "/spider/guanying/3"); playLines
+    /// must call /play on THAT route, not the douban route. nil =
+    /// the item's own source route.
+    public var resolvedSiteAPI: String? = nil
 
     public enum MediaType: String, Codable, Hashable {
         case movie, tv, variety, anime, short, unknown
@@ -38,13 +45,14 @@ public struct VideoItem: Identifiable, Hashable, Codable {
                 content: String? = nil, rating: Double? = nil,
                 mediaType: MediaType = .unknown,
                 playFrom: [String] = [], episodes: [Episode] = [],
-                playGroups: [[String]] = []) {
+                playGroups: [[String]] = [], resolvedSiteAPI: String? = nil) {
         self.id = id; self.sourceID = sourceID; self.title = title
         self.coverURL = coverURL; self.backdropURL = backdropURL
         self.year = year; self.area = area; self.remarks = remarks
         self.typeName = typeName; self.actors = actors; self.director = director
         self.content = content; self.rating = rating; self.mediaType = mediaType
         self.playFrom = playFrom; self.episodes = episodes; self.playGroups = playGroups
+        self.resolvedSiteAPI = resolvedSiteAPI
     }
 
     /// Spec badges shown on the detail page as plain text
