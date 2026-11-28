@@ -43,8 +43,8 @@ settings:
   base:
     PRODUCT_NAME: YiPlayer
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "2.1.3"
-    CURRENT_PROJECT_VERSION: "6"
+    MARKETING_VERSION: "2.1.4"
+    CURRENT_PROJECT_VERSION: "7"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad 通用（用户 2026-11-27 决定：先做手机+iPad 通用 IPA，测试没问题后再做 tvOS）
     SUPPORTS_MACCATALYST: NO
@@ -100,8 +100,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: YiPlayer
-        CFBundleShortVersionString: "2.1.3"
-        CFBundleVersion: "6"
+        CFBundleShortVersionString: "2.1.4"
+        CFBundleVersion: "7"
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
