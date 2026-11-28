@@ -747,7 +747,7 @@ public final class CatSource: SourceRunner {
         guard let list = json["list"] as? [[String: Any]] else {
             throw SourceError.parse("猫源\(route)返回的结果里没有 list：\(String(text.prefix(300)))")
         }
-        return list.compactMap { JsonSource.videoItem(from: $0, sourceID: source.id) }
+        return list.compactMap { JsonSource.videoItem(from: $0, sourceID: sourceID) }
     }
 
     private func nodeItems(params: [String: Any]) async throws -> [VideoItem] {
