@@ -1,9 +1,43 @@
-# YiPlayer — 精简版视频播放器（v2.1.3）
+# YiPlayer — 精简版视频播放器（v2.1.4）
 
 Bundle ID `com.yiplayer.app` · SwiftUI · iOS 17+ · 无外部 Swift Package 依赖。
 参考：tvbox-silicon（Yingxia）、MarcoMovie（“marcotv”最可能的所指）、
 NOCTRA（noc.zijiu522.cn）、Rex（rexnow.tv）。调研见 `research-tvbox-marcotv.md`
 和 `research-noctra-rex-cat.md`。**本仓库不含任何片库，也不内置任何源。**
+
+v2.1.4 相对 v2.1.3 的变化：**修了 2026-11-28 11:37 真机实测的两个问题，
+都是直接读 9280 bundle 实时代码确认的**（重新下载并对 .md5：
+d8e69da8c37a29afe50fdc8de9dbf268，和 11 月 27 日一致，文件没换过）：
+(1) **详情页没有线路、没有选集**——v2.1.3 真机上搜索能用，详情页
+《巴黎绽放的星辰》有海报、标题和评分 7.2，但 `/detail` 返回 `{}`，
+红字报错“解析失败：猫源 /detail 返回的结果里没有 list：{}”。
+读 bundle 证实这不是请求写错了：Fastify 路由是 `t.detail &&
+o.post("/detail", t.detail.bind(t))`，直接绑到蜘蛛的方法上，不包
+装、不加字段；host.mjs 发的 `{id}` 正是蜘蛛读的 `body?.id`，/init
+也早调过了（豆瓣蜘蛛的 init 本来就是空操作）。真正的原因是豆瓣
+蜘蛛的 detail/search/play 全是空壳——`async detail(){return{}},
+async play(){return{}},async search(){return{}}`，全 bundle 仅有的
+两处空壳（另一处是 `gengxin`，名字就是日期戳 "日期:20261127"）；
+它的 home/分类是真的（拉 frodo.douban.com 热榜，条目 id 是
+`msearch:<豆瓣 id>`），所以海报标题评分都正常，唯独没有线路。
+修法：`/detail` 返回空且 id 是 `msearch:` 开头时，按片名去 bundle
+里别的站并行搜（最多 8 个），取标题匹配的站再调它的 `/detail` 拿
+线路；`/play` 也走那个站的路由；再失败时报错贴出本次请求的
+route + body、原始返回前 300 字和试过的站。(2) **一个 bundle 只
+显示 1 个源**——Yingxia 同款链接能看到几十个站，YiPlayer 只显示
+douban。读 /config 证实：video 组有 93 个站，每条是
+`{key:"nodejs_<key>",name:"名字|分组",type:3,searchable,api:"/spider/<key>/<type>"}`，
+分组就是名字里 `|` 后面的标签（93 条里 91 条带 `|`，共 33 个分组，
+如“玩偶|4K”、“花卷|秒播”）；Yingxia 截图里的分组名（推荐/摸鱼/蝴蝶/牛二）在
+bundle 里出现 0 次，是 Yingxia 自己的分组，不照抄。修法：设置
+里“展开全部站点”把一个 bundle 订阅展开成每个站一个独立的源
+（各带自己的 api 路由，发现页按 `|分组` 展示、搜索并行搜这些站；
+豆瓣站不参与搜索——它的 search 也是空壳）；展开后所有站共用
+一个 bundle 文件和一个 Node worker（host.mjs 按文件路径起
+worker，一站一个文件会起 90 个），同一次并行搜索也只下载一次
+bundle。**但 v2.1.4 还没有在 Xcode / 真机上验证过**——见
+BUILD_NOTES.md 的未验证清单；修法只在本机对真实 bundle 的代码
+和 Node 24 实测验证过。
 
 v2.1.3 相对 v2.1.2 的变化：**修了 9280 猫源“有分类没内容”的两个根因，
 都是 2026-11-28 早上直接读 9280 bundle 实时代码确认的**（.md5 仍是
@@ -72,8 +106,10 @@ Python 初始化失败**——报错是 "failed to read thread state"，根因�
   `index.js` 就是这种：先校验 `.md5`，再写到 Application Support，
   在 `127.0.0.1` 上起它自己的 Fastify 服务，`CatSource` 走
   `/spider/<站点>/{init,home,category,detail,play,search}` 调它；
-  站点列表从 bundle 的 `/config` 拿，设置里可以切换（默认第一个，
-  9280 的 SOURCE_ORDER 从 douban 开始）。真正的 **websiteBundle**
+  站点列表从 bundle 的 `/config` 拿：设置里“展开全部站点”可以把
+  一个 bundle 展开成每个站一个独立的源（v2.1.4，默认仍是单个源，
+  9280 的 SOURCE_ORDER 从 douban 开始），也可以只切换单个站点。
+  真正的 **websiteBundle**
   包仍走 v1 的 JavaScriptCore 有界宿主（只暴露 `Spider` /
   `net.req` / `net.json` / `proxyUrl` / `page` / `md5` / `sha256`，
   请求体上限 6 MiB）。
@@ -224,8 +260,11 @@ YiPlayer/
   进 `Runtime/PythonHost/spiders/pd.py`，以根目录的为准）；
   `base.spider` 最小兼容包已写好；`catvodsub.txt` 里只有 9280
   那个猫源地址，以后有别的订阅地址加到这个文件里就行。
-  唯一要用户做的：装好 v2.1.2 后试一遍 py 源和猫源能不能播，
-  播不了把报错截图发回来。
+  唯一要用户做的：装好 v2.1.4 后 (1) 在设置 → 猫源站点里点
+  “展开全部站点”，看 9280 是不是展开成几十个站、发现页分组对
+  不对；(2) 打开豆瓣站的一部片（比如《巴黎绽放的星辰》），看
+  详情页有没有线路和选集、能不能播；(3) 再试一遍 py 源和猫源
+  搜索能不能用，播不了或展开不对把报错截图发回来。
 
 ## 许可证注意
 
