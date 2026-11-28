@@ -18,17 +18,28 @@ public struct Source: Identifiable, Hashable, Codable {
     public var name: String
     public var kind: SourceKind
     public var api: URL            // base URL / spider file URL, resolved against the subscription URL
-    public var spider: String?     // cat/py: spider file name or inline script id (ext / spider field)
+    public var spider: String?     // cat/py: spider file name or inline script id (ext / spider field).
+                                   // For an EXPANDED server-bundle site (v2.1.4) this is the site's
+                                   // own route, e.g. "/spider/douban/3" — the runner uses it
+                                   // verbatim instead of the legacy per-source siteKey.
     public var isSearchable: Bool
     public var isChangeable: Bool
     public var subscriptionID: String
+    /// Display group for the Discover source picker (v2.1.4). For an
+    /// expanded server-bundle site this is the tag after "|" in the
+    /// bundle's /config name (e.g. "4K", "秒播"), or the bundle's own
+    /// config group (video/read/comic/music/pan). "" = ungrouped
+    /// (py / TVBox JSON / legacy single cat sources).
+    public var group: String = ""
 
     public init(id: String, name: String, kind: SourceKind, api: URL,
                 spider: String? = nil, isSearchable: Bool = true,
-                isChangeable: Bool = true, subscriptionID: String) {
+                isChangeable: Bool = true, subscriptionID: String,
+                group: String = "") {
         self.id = id; self.name = name; self.kind = kind; self.api = api
         self.spider = spider; self.isSearchable = isSearchable
         self.isChangeable = isChangeable; self.subscriptionID = subscriptionID
+        self.group = group
     }
 }
 
@@ -48,6 +59,12 @@ public protocol SourceRunner: AnyObject {
     func category(typeID: String, page: Int) async throws -> (items: [VideoItem], pageCount: Int)
     func category(typeID: String, page: Int, filter: [String: String]) async throws -> (items: [VideoItem], pageCount: Int)
     func detail(vodID: String) async throws -> VideoItem
+    /// Same, with the item's title. CatSource uses the title for its
+    /// aggregator fallback (v2.1.4): a douban-style item's /detail is
+    /// a stub in the bundle, so the lines are resolved by searching
+    /// the bundle's other sites by title. The default ignores the
+    /// title, so JsonSource / PySource need no change.
+    func detail(vodID: String, title: String?) async throws -> VideoItem
     func search(keyword: String, page: Int) async throws -> [VideoItem]
     /// Resolve one episode to all of its playable lines (multi-line selectable).
     func playLines(for episode: Episode) async throws -> [PlayLine]
@@ -59,6 +76,10 @@ public protocol SourceRunner: AnyObject {
 // PySource and CatSource override categories(), and PySource overrides
 // the filtered category (window 日榜/周榜/月榜/总榜).
 public extension SourceRunner {
+    func detail(vodID: String, title: String?) async throws -> VideoItem {
+        try await detail(vodID: vodID)
+    }
+
     func categories() async throws -> [(id: String, name: String)] {
         [("1", "电影"), ("2", "连续剧"), ("3", "综艺纪录"), ("4", "动漫"), ("126", "短剧")]
     }
