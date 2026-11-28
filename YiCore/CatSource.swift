@@ -14,16 +14,26 @@ import Foundation
 //     lists its sites; the user picks one in Settings (default: the
 //     first site /config lists, else "douban" — the 9280 bundle's
 //     SOURCE_ORDER starts there).
+//     v2.1.3: the 9280 bundle is a CatVodSpiderios STANDALONE server,
+//     not an embeddable CatPawOpen bundle — it has no exports.start
+//     (only dead-code module.exports) and autostarts only as
+//     `node index.js` with no catServerFactory (see worker.mjs).
+//     Its /config is grouped: {video:{sites:[...]},read:{sites:[]},
+//     comic:{...},music:{...},pan:{...}}; each site's `api` field
+//     ("/spider/<key>/<type>") is the route, because its keys are
+//     `nodejs_<key>` and cannot be appended to /spider/.
 //
 // The test URL https://9280.kstore.vip/cat/index.js.md5 returns ONE line:
 //   d8e69da8c37a29afe50fdc8de9dbf268
 // That is the MD5 checksum of index.js, NOT the bundle itself.
 // The bundle at https://9280.kstore.vip/cat/index.js (17,087 lines) is a
-// CatPawOpen-style Fastify SERVER bundle — async queues, Fastify server
-// code, an Ott config with alist/netdisk sites, a danmu module
-// (@dan-uni/dan-any 2.3.9), SOURCE_ORDER "douban,360,renren,hanjutv".
-// It is NOT the aaaaa2780009/cat-bundle build (65,702 lines, first line
-// "// ====慕猫源", defines globalThis.websiteBundle).
+// CatVodSpiderios STANDALONE Fastify server bundle — async queues,
+// Fastify server code, an Ott config with alist/netdisk sites, a danmu
+// module (@dan-uni/dan-any 2.3.9), SOURCE_ORDER "douban,360,renren,
+// hanjutv". It is NOT the aaaaa2780009/cat-bundle build (65,702 lines,
+// first line "// ====慕猫源", defines globalThis.websiteBundle), and
+// NOT an embeddable CatPawOpen bundle: no exports.start, autostart
+// only as `node index.js` (v2.1.3: worker.mjs standalone mode).
 //
 // TVBox JSON type 1 / type 4 sources are NOT handled here — see
 // JsonSource below (same file, v1, URLSession + JSONDecoder only).
@@ -46,13 +56,20 @@ public final class CatSource: SourceRunner {
     public private(set) var sites: [(key: String, name: String)] = []
 
     /// The site inside the bundle that home/category/detail/search/play
-    /// call ("/spider/<siteKey>"). Persisted per source; defaults to
-    /// the first site /config lists, else "douban" (the 9280 bundle's
-    /// SOURCE_ORDER starts there).
+    /// call. Persisted per source; defaults to the first site /config
+    /// lists, else "douban" (the 9280 bundle's SOURCE_ORDER starts
+    /// there). A stored value that is no longer among the current
+    /// sites (e.g. the bogus "video" v2.1.2 stored for the 9280
+    /// bundle, before grouped /config parsing existed) falls back
+    /// to the first site instead of calling a route that does not
+    /// exist.
     public var siteKey: String {
         get {
-            UserDefaults.standard.string(forKey: "yiplayer.cat.site.\(source.id)")
-                ?? sites.first?.key ?? "douban"
+            let stored = UserDefaults.standard.string(forKey: "yiplayer.cat.site.\(source.id)")
+            if let stored, !sites.isEmpty, !sites.contains(where: { $0.key == stored }) {
+                return sites[0].key
+            }
+            return stored ?? sites.first?.key ?? "douban"
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "yiplayer.cat.site.\(source.id)")
@@ -64,7 +81,13 @@ public final class CatSource: SourceRunner {
         self.runtime = runtime
     }
 
-    private var catPawOpen: String { "/spider/\(siteKey)" }
+    /// The route host.mjs calls for this site. Usually
+    /// "/spider/<siteKey>", but /config entries that carry their own
+    /// `api` field (e.g. "/spider/douban/3" from the 9280 bundle)
+    /// are stored as the key itself, and are used verbatim.
+    private var catPawOpen: String {
+        siteKey.hasPrefix("/") ? siteKey : "/spider/\(siteKey)"
+    }
 
     // MARK: Bundle loading + .md5 verification
     public func loadBundle() async throws {
@@ -138,16 +161,40 @@ public final class CatSource: SourceRunner {
         // Start Node (lazy, once per process) and ask the bundle for its
         // site list. A bundle that never answers /config still works:
         // siteKey falls back to "douban" (see the siteKey getter).
+        // But a bundle that DOES answer /config and yields no usable
+        // site is a real problem, not a fallback case: throw with the
+        // raw answer, so the next device test shows what /config
+        // actually returned instead of a blank page (v2.1.2's strict
+        // parsing, applied to the site list itself).
         let configText = try? await node.config(bundle: file.path, api: originURL.absoluteString,
                                                 profile: profile.path)
-        if let configText { sites = Self.parseSites(from: configText) }
+        if let configText {
+            sites = Self.parseSites(from: configText)
+            guard !sites.isEmpty else {
+                throw SourceError.parse("猫源 /config 里没有可用的站点：\(String(configText.prefix(300)))")
+            }
+        }
     }
 
     /// Best-effort site list from a bundle's GET /config answer.
-    /// The config shape is bundle-defined and unverified for the 9280
-    /// bundle (see BUILD_NOTES.md): try the common shapes, else [].
-    /// Accepted: {"sites"|"list"|"sources"|"data": [{key,name}|{id,title}]}
-    /// or a top-level array, or a dict keyed by site key.
+    /// Shapes, tried in order (v2.1.3):
+    ///  1. Top-level array under sites/list/sources/data:
+    ///     {"sites": [{key,name}|{id,title}|{...,api}]} (old shape,
+    ///     still accepted).
+    ///  2. Grouped shape (the 9280 bundle):
+    ///     {video:{sites:[...],danmuSearchUrl},read:{sites:[]},
+    ///     comic:{sites:[]},music:{sites:[]},pan:{sites:[]},...} —
+    ///     the entries of each group's `sites` array, video first.
+    ///  3. Dict keyed by site key: {"douban": {"name": ...}, ...}.
+    ///     NOTE: this must stay LAST — on the grouped shape it would
+    ///     otherwise turn the group names (video/read/comic/...) into
+    ///     fake sites, which is exactly what v2.1.2 did (siteKey
+    ///     became "video", /spider/video 404'd).
+    /// One entry's key: its `api` field when present — the full route
+    /// (e.g. "/spider/douban/3"), because /config keys are
+    /// `nodejs_<key>` (e.g. nodejs_douban) and cannot be appended to
+    /// /spider/; else its key/id with a "nodejs_" prefix stripped.
+    /// Duplicate keys are dropped, first occurrence wins.
     static func parseSites(from text: String) -> [(key: String, name: String)] {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) else { return [] }
@@ -157,19 +204,61 @@ public final class CatSource: SourceRunner {
                 if let arr = dict[key] as? [[String: Any]] { raw = arr; break }
             }
             if raw.isEmpty {
-                // Dict keyed by site key: {"douban": {"name": ...}, ...}
-                raw = dict.compactMap { (k, v) -> [String: Any]? in
-                    guard var d = v as? [String: Any] else { return nil }
-                    d["key"] = d["key"] ?? k
-                    return d
+                // Grouped shape: {video:{sites:[...]},read:{sites:[]},...}
+                // JSONSerialization gives no key order, so walk the
+                // groups in a fixed preference order, video first.
+                // Once a group is recognised (a dict with a "sites"
+                // key, or an array), the shape IS grouped — even if
+                // every group is empty, the dict-keyed fallback below
+                // must not run, or it would turn the group names
+                // (video/read/...) back into fake sites.
+                let groups = ["video", "read", "comic", "music", "pan"]
+                    + dict.keys.filter { !["video", "read", "comic", "music", "pan"].contains($0) }.sorted()
+                var grouped = false
+                for group in groups {
+                    guard let value = dict[group] else { continue }
+                    if let groupDict = value as? [String: Any] {
+                        // A dict with a "sites" key IS a group, even if
+                        // its entries turn out unparsable — the shape
+                        // is grouped, so the fallback below must not
+                        // misread the group name as a site.
+                        if groupDict["sites"] != nil {
+                            grouped = true
+                            if let arr = groupDict["sites"] as? [[String: Any]] {
+                                raw.append(contentsOf: arr)
+                            }
+                        }
+                    } else if let arr = value as? [[String: Any]] {
+                        grouped = true
+                        raw.append(contentsOf: arr)
+                    }
+                }
+                if !grouped {
+                    // Dict keyed by site key: {"douban": {"name": ...}, ...}
+                    raw = dict.compactMap { (k, v) -> [String: Any]? in
+                        guard var d = v as? [String: Any] else { return nil }
+                        d["key"] = d["key"] ?? k
+                        return d
+                    }
                 }
             }
         } else if let arr = json as? [[String: Any]] {
             raw = arr
         }
-        return raw.compactMap { d in
-            guard let key = (d["key"] as? String) ?? (d["id"] as? String),
-                  !key.isEmpty else { return nil }
+        var seen = Set<String>()
+        return raw.compactMap { d -> (key: String, name: String)? in
+            let key: String
+            if let api = d["api"] as? String, !api.trimmingCharacters(in: .whitespaces).isEmpty {
+                let trimmed = api.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("/") { key = trimmed }
+                else if trimmed.hasPrefix("spider/") { key = "/\(trimmed)" }
+                else { key = "/spider/\(trimmed)" }
+            } else if let rawKey = (d["key"] as? String) ?? (d["id"] as? String), !rawKey.isEmpty {
+                key = rawKey.hasPrefix("nodejs_") ? String(rawKey.dropFirst("nodejs_".count)) : rawKey
+            } else {
+                return nil
+            }
+            guard seen.insert(key).inserted else { return nil }
             let name = (d["name"] as? String) ?? (d["title"] as? String) ?? key
             return (key, name)
         }
