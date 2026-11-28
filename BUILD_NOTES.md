@@ -1,9 +1,10 @@
-# BUILD_NOTES.md — 假设与未验证项（v2.1.2）
+# BUILD_NOTES.md — 假设与未验证项（v2.1.3）
 
-本文件列出构建 YiPlayer v1 + v2 + v2.1 + v2.1.1 + v2.1.2 时做的每一个假设和每一条未验证的说法。
-**v2.1.2 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
+本文件列出构建 YiPlayer v1 + v2 + v2.1 + v2.1.1 + v2.1.2 + v2.1.3 时做的每一个假设和每一条未验证的说法。
+**v2.1.3 没有在 Xcode / 真机上构建或测试过** —— 本机是 Linux VM，没有
 macOS / Xcode；只做了 YAML 语法、Swift 括号平衡、Python/JS 语法、
-以及文件引用完整性等静态检查（见“已验证”）。
+以及文件引用完整性等静态检查（见“已验证”），外加 worker.mjs 与
+parseSites 算法的合成测试（见“v2.1.3 改了什么”）。
 v1 的构建是真的（GitHub Actions run #4 成功，265 KB 未签名 IPA，
 见“v1 历史”）；v2 的构建也是真的（Actions run #22 成功，23.4 MB
 未签名 IPA，见“v2 构建实录”），用户已在 LiveContainer 里装了 v2.0.0，
@@ -14,6 +15,145 @@ v2.1.0 也已构建成功（Actions run #37，31.3 MB IPA，见“v2.1 构建实
 run #48，31.3 MB IPA，v2.1.1 build 4），用户装后报
 Python 初始化已过、但 `_yi_bridge` 导入失败（错误码 5），v2.1.2
 就是针对这个修的（见“v2.1.2 改了什么”）。
+
+run #48，31.3 MB IPA，v2.1.1 build 4），用户装后报
+Python 初始化已过、但 `_yi_bridge` 导入失败（错误码 5），v2.1.2
+就是针对这个修的（见“v2.1.2 改了什么”）；v2.1.2 也已构建成功
+（Actions run #46037163191，31.3 MB IPA，v2.1.2 build 5），用户
+2026-11-28 08:37 直接授权做 v2.1.3，不等 2.1.2 的测试截图——
+2026-11-28 早上直接读 9280 bundle 实时代码，已确认“有分类没
+内容”的两个根因不在解析，而在启动方式和 /config 形状，修法都
+想好了（见“v2.1.3 改了什么”）。
+
+## v2.1.3 改了什么（相对 v2.1.2）
+
+背景：用户 2026-11-28 08:37 说“直接做 v2.1.3”。2026-11-28 早上
+07:00–07:15 直接读了 9280 bundle 的实时代码（.md5 仍是
+d8e69da8c37a29afe50fdc8de9dbf268，和 2026-11-27 记录一致，文件没
+换过），确认“9280 有分类没内容”不是解析问题——v2.1.2 加的严格
+解析只能把报错露出来，修不了根因。两个根因都在下面。
+
+### 根因 A（决定性的）：9280 的包是独立服务器，不是可嵌入的 bundle
+
+证据（静态读代码，行号是 bundle 全文的行号）：
+
+- 入口在文件末尾约 16979–16981 行：`BTr()&&Dtt().catch(...)`；
+  `BTr()` 只有以 `node index.js` 独立运行、且没有 catServerFactory
+  时才自启（`process.env.CATVOD_DISABLE_AUTOSTART==="1"` 或
+  `typeof globalThis.catServerFactory==="function"` 时返回 false；
+  否则要求 `/(?:^|[\/])index\.js$/i.test(process.argv[1]||"")`）。
+- 全文件唯一的 module.exports 是死代码
+  `0&&(module.exports={start,stop});`，根本不存在 start 函数。
+  v2.1.2 的 worker.mjs `require(bundle)` 后检查
+  `typeof exports.start !== 'function'` 就抛
+  "The script is not a CatPawOpen bundle"，host.mjs 的 start()
+  随之失败——所有 Node 调用都会报错。
+- Dtt 本身接受 catServerFactory，但只在 BTr() 为真时才被调用，
+  而 BTr() 为真恰恰要求 catServerFactory 不存在——嵌入路径是
+  bundle 自己堵死的。正确跑法是独立进程：`node index.js`，监听
+  9988 端口（或 PORT/DEV_HTTP_PORT 环境变量，端口占用自动+1）。
+
+修法（`Runtime/NodeHost/worker.mjs`，standalone 模式）：
+
+- exports.start 不存在时，不定义 catServerFactory。实现细节：
+  worker 先按老样子 require 一次（用来看 exports 里有没有
+  start；此时 factory 是定义着的，BTr() 为 false，Dtt() 没跑，
+  第一次加载只跑了定义）；确认没有 start 后，删 require.cache
+  里的 bundle 条目、删掉 catServerFactory、清掉
+  CATVOD_DISABLE_AUTOSTART、把 `process.argv[1]` 指向 bundle
+  文件本身，再 require 第二次——这时 BTr() 为真，顶层的
+  `BTr()&&Dtt()` 启动服务器。bundle 文件在设备上本来就叫
+  index.js（`CatSource.startServerBundle` 写盘时就是这个名），
+  所以 argv[1] 的正则能匹配上，不用改写盘逻辑。
+- 然后等 bundle 的 GET /health 通了再把端口报给 host.mjs：
+  从 `PORT || DEV_HTTP_PORT || 9988` 起、往上试 10 个端口，
+  20 秒超时；任何 HTTP 应答（哪怕 404）都算“有服务器在听”，
+  只有 2xx 之外的状态会在日志里留一句。启动失败时报错写明是
+  standalone 模式、等了多少秒、最后一次 /health 的结果。
+- standalone 模式下 worker 没有 bundle 服务器的句柄，relisten
+  消息直接回一个说明性的 error，不再对 undefined 的 server
+  调用 close()（原来会直接抛错）。host.mjs 的 /call 路由不用改。
+- CatPawOpen 路径（exports.start 存在）一字未动：factory 仍在
+  require 之前定义，start(config) 后等 server.listening。
+
+验证（合成测试包，不是真的 9280 bundle——**真的 9280 bundle
+本地没有跑起来过**，见下“仍未验证”）：
+
+- 用 Node 24 在本机搭了一个仿 9280 契约的假包
+  （`/tmp/yi213/standalone/index.js`：无 exports.start、只有死
+  代码 module.exports、顶层 `BTr()&&Dtt()`、9988 端口上
+  /health + 分组 /config + /spider/douban/3/* 路由），worker.mjs
+  对它报 `{ready:true, port:19088}`（PORT 环境变量指定），随后
+  GET /config 200，返回分组形状——standalone 模式全程走通。
+- 对照实验（同个假包）：factory 定义着 require → 19089 端口
+  ECONNREFUSED（自启被堵死，和 v2.1.2 的行为一致）；删掉
+  factory、argv[1] 指向 index.js 再 require → /health 200。
+  这证明修法改的正是堵住自启的那个点。
+- 回归：仿 CatPawOpen 的假包（exports.start + catServerFactory）
+  仍走老路径，`{ready:true, port:44647}`（临时端口），GET
+  /config 200。`node --check worker.mjs` 通过。
+
+### 根因 B：/config 是分组形状，v2.1.2 的解析认不出
+
+证据：bundle 的 /config 返回
+`{video:{sites:[...],danmuSearchUrl},read:{sites:[]},
+comic:{sites:[]},music:{sites:[]},pan:{sites:[]},color:[...]}`。
+v2.1.2 的 `CatSource.parseSites` 只认顶层 sites/list/sources/data，
+认不到就走“字典 key 当站点”的兜底，把 video/read/comic/music/pan
+当成站，siteKey 默认取第一个 "video"，调 /spider/video 会 404。
+
+修法（`YiCore/CatSource.swift`）：
+
+- parseSites 按顺序试三种形状：(1) 顶层 sites/list/sources/data
+  数组（旧形状，照旧）；(2) 分组形状——取每个分组的 `sites`
+  数组，按 video、read、comic、music、pan 的固定优先顺序
+  （JSONSerialization 不保字典序，所以不能依赖返回顺序）；
+  (3) 字典 key 当站点（兜底）。关键：**一旦认出是分组形状
+  （任一分组是带 "sites" 的字典），哪怕所有分组都是空数组，
+  也不走 (3)**——否则空分组又会变回 video/read 这种假站点；
+  这种情况下 startServerBundle 直接抛错，贴出 /config 原始
+  响应的前 300 字（沿用 v2.1.2 的严格解析做法）。
+- 每条目的 key：优先用它的 `api` 字段（形如 "/spider/douban/3"）
+  当完整路由——因为 /config 里的 key 是 `nodejs_<key>`
+  （如 nodejs_douban），不能直接拼 /spider/ 后面；api 没斜杠
+  开头的按 "spider/..." 或裸路径分别补齐；没有 api 时用
+  key/id，并去掉 "nodejs_" 前缀；key 按首次出现去重。
+- `catPawOpen` 改为：siteKey 以 "/" 开头就原样用，否则拼成
+  "/spider/<siteKey>"——旧的纯 key（如 "douban"）和新的完整
+  api 路径都能走通；host.mjs 的 `/^\/spider\/[^?#]+$/` 校验
+  本来就允许 "/spider/douban/3" 这种带两段的路径，不用改。
+- siteKey 的 getter 加了迁移保护：已存的值不在当前站点列表
+  里时（比如 v2.1.2 存下的 bogus "video"），回落到第一个
+  站点，而不是继续调不存在的路由。
+- /config 有返回但解析不到任何可用站点时，startServerBundle
+  现在抛错（贴原始响应前 300 字）；/config 根本没拿到
+  （node.config 抛错）时仍保留 douban 兜底。
+
+验证：把 parseSites 的算法原样抄成 JS，在本机跑了 7 组输入——
+分组 9280 形状 → /spider/douban/3、/spider/360/1；旧顶层
+sites、字典 key 形状照旧；空分组 → []（不再出假站点）；
+api 没斜杠、key 带 nodejs_ 前缀、重复 key 都按预期处理。
+**这验证的是算法，不是 Swift 代码本身**——Swift 只能静态
+检查（括号平衡、类型一致），真机上以 /config 的实际返回为准。
+
+### 仍未验证（v2.1.3）
+
+- **最关键的两项**：真的 9280 bundle 在真机上能不能跑起来
+  （standalone 模式 + /health）、/config 解析后能不能拿到
+  douban 等站、分类/搜索/详情/播放能不能通。本地只验证了
+  合成测试包，真的 bundle 没有跑起来过（浏览器没能把
+  index.js 存成文件；站点首页还返回 502；只存下一个 5.0 MB
+  的页面 PDF，里面的 JS 文本是换行打断的，无法还原成可运行
+  文件、MD5 也对不上）。
+- douban 等上游站在用户手机网络下通不通；`http://www.y456y.com`
+  的 ATS；LiveContainer 内置文件浏览器；图标显示；冷启动时间。
+- 一个诚实提醒：v2.1.1 测试里看到的分类“电影/连续剧/综艺纪录/
+  动漫/短剧”和 CatSource.swift 里写死的 v1 兜底列表一字不差，
+  很可能根本不是 bundle 的 /home 返回的——不要把那次的分类
+  当成 bundle 真实输出的证据。v2.1.3 的测试可以一锤定音：
+  如果 Discover 出现 "The script is not a CatPawOpen bundle"
+  之类的 Node 错误，说明 standalone 模式没生效；如果出现
+  /config 或 /spider/... 的 404，把报错原文发回。
 
 ## v2.1.2 改了什么（相对 v2.1.1）
 
