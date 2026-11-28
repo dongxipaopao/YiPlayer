@@ -1,9 +1,32 @@
-# YiPlayer — 精简版视频播放器（v2.1.2）
+# YiPlayer — 精简版视频播放器（v2.1.3）
 
 Bundle ID `com.yiplayer.app` · SwiftUI · iOS 17+ · 无外部 Swift Package 依赖。
 参考：tvbox-silicon（Yingxia）、MarcoMovie（“marcotv”最可能的所指）、
 NOCTRA（noc.zijiu522.cn）、Rex（rexnow.tv）。调研见 `research-tvbox-marcotv.md`
 和 `research-noctra-rex-cat.md`。**本仓库不含任何片库，也不内置任何源。**
+
+v2.1.3 相对 v2.1.2 的变化：**修了 9280 猫源“有分类没内容”的两个根因，
+都是 2026-11-28 早上直接读 9280 bundle 实时代码确认的**（.md5 仍是
+d8e69da8c37a29afe50fdc8de9dbf268，和 11 月 27 日一致，文件没换过）：
+(1) 9280 的包是 CatVodSpiderios **独立服务器**，不是可嵌入的 CatPawOpen
+bundle——它根本没有 `exports.start`（唯一的 module.exports 是死代码），
+只在以 `node index.js` 独立运行、且没有 catServerFactory 时才自启；
+而 v2.1.2 的 worker 定义了 catServerFactory，等于亲手把它的自启堵死了，
+然后报 "The script is not a CatPawOpen bundle"。修法：worker.mjs 增加
+standalone 模式——没有 exports.start 时不定义 catServerFactory、把
+argv[1] 指向 bundle 文件本身（设备上本来就叫 index.js），等它的
+/health 通了再把端口（9988 起，占用自动+1，按包自己的规则）报给
+host.mjs；host.mjs 的 /call 路由不用改。启动失败时报错写明是 standalone
+模式、等了多久、最后一次 /health 的结果。(2) 它的 /config 是**分组形状**
+`{video:{sites:[...]},read:{sites:[]},comic:{...},...}`，v2.1.2 的解析
+只认顶层 sites，认不到就把 video/read/comic 当成站，默认调不存在的
+/spider/video。修法：解析 video.sites（以及 read/comic/music/pan），
+直接用每条目的 `api` 字段（"/spider/douban/3" 这类）当调用路由——因为
+/config 里的 key 是 `nodejs_<key>`，不能直接拼 /spider/ 后面；旧的顶层
+sites 形状仍然能解析；/config 有返回但解析不到任何站点时直接报错并
+贴出原始响应的前 300 字。**但 v2.1.3 还没有在 Xcode / 真机上验证过**
+——见 BUILD_NOTES.md 的未验证清单；9280 的包本地也没有跑起来过，
+修法只在合成测试包上验证过（见 BUILD_NOTES.md 的 v2.1.3 一节）。
 
 v2.1.2 相对 v2.1.1 的变化：**修了 v2.1.1 在 LiveContainer 里实测仍卡住的
 Python 导入失败**——初始化已经过了（"failed to read thread state"
