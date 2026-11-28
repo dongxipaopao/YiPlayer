@@ -136,7 +136,11 @@ struct DetailView: View {
     private func loadDetail() async {
         guard let source = subscriptions.allSources.first(where: { $0.id == item.sourceID }) else { return }
         do {
-            detail = try await runner(for: source).detail(vodID: item.id)
+            // The title is passed for the cat aggregator fallback
+            // (v2.1.4): a douban-style item's own /detail is a stub in
+            // the bundle, so its lines are resolved by searching the
+            // bundle's other sites by this title.
+            detail = try await runner(for: source).detail(vodID: item.id, title: item.title)
         } catch {
             // v2.1: cancellation (including URLError .cancelled) is
             // not an error — see displayableErrorMessage.
