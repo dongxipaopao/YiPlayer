@@ -9,6 +9,11 @@ import SwiftUI
 struct DiscoverView: View {
     @EnvironmentObject private var subscriptions: SubscriptionStore
     @State private var selectedSource: Source?
+    /// Group filter (v2.1.4). nil = all groups. Expanded bundle
+    /// sources carry a group (the tag after "|" in the bundle's
+    /// /config name, e.g. "4K", "秒播"); ungrouped sources (py / JSON
+    /// / legacy cat) have group "".
+    @State private var selectedGroup: String?
     @State private var selectedCategory = "1"
     @State private var categories: [(id: String, name: String)] = []
     @State private var categoriesForSourceID: String?
@@ -27,6 +32,9 @@ struct DiscoverView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                // Group chips first (v2.1.4): only when at least one
+                // source is grouped (expanded bundle sites).
+                if !groups.isEmpty { groupPicker }
                 sourcePicker
                 categoryPicker
                 windowPicker
@@ -56,10 +64,54 @@ struct DiscoverView: View {
         }
     }
 
+    /// Groups present among the sources, in first-seen order.
+    /// (v2.1.4: the tag after "|" in an expanded bundle site's
+    /// /config name, e.g. "4K", "秒播", "体育".)
+    private var groups: [String] {
+        var seen: [String] = []
+        for group in subscriptions.allSources.map(\.group) where !group.isEmpty && !seen.contains(group) {
+            seen.append(group)
+        }
+        return seen
+    }
+
+    /// Sources visible under the current group filter.
+    private var visibleSources: [Source] {
+        guard let selectedGroup else { return subscriptions.allSources }
+        return subscriptions.allSources.filter { $0.group == selectedGroup }
+    }
+
+    private func selectGroup(_ group: String?) {
+        selectedGroup = group
+        let available = group == nil
+            ? subscriptions.allSources
+            : subscriptions.allSources.filter { $0.group == group }
+        selectedSource = available.first
+        page = 1
+        Task { await load() }
+    }
+
+    private var groupPicker: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Button("全部") { selectGroup(nil) }
+                    .buttonStyle(.bordered)
+                    .tint(selectedGroup == nil ? .accentColor : .secondary)
+                ForEach(groups, id: \.self) { group in
+                    Button(group) { selectGroup(group) }
+                        .buttonStyle(.bordered)
+                        .tint(selectedGroup == group ? .accentColor : .secondary)
+                }
+            }
+            .padding(.horizontal)
+        }
+        .padding(.vertical, 8)
+    }
+
     private var sourcePicker: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(subscriptions.allSources) { source in
+                ForEach(visibleSources) { source in
                     Button(source.name) { selectedSource = source; page = 1; Task { await load() } }
                         .buttonStyle(.bordered)
                         .tint(selectedSource?.id == source.id ? .accentColor : .secondary)
@@ -104,7 +156,11 @@ struct DiscoverView: View {
     }
 
     private func load() async {
-        guard let source = selectedSource ?? subscriptions.allSources.first else { return }
+        // A stale selection (e.g. the legacy single cat source after
+        // its subscription was expanded in Settings) falls back to
+        // the first visible source instead of loading nothing.
+        let available = visibleSources
+        guard let source = available.first(where: { $0.id == selectedSource?.id }) ?? available.first else { return }
         selectedSource = source
         isLoading = true
         defer { isLoading = false }
